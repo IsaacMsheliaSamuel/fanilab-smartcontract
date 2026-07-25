@@ -1,7 +1,12 @@
 #![no_std]
 #![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
-use shared_types::FaniLabError;
+use shared_types::{
+    events, DriverRegisteredEvent, KycStatusUpdatedEvent, ReputationDecreasedEvent,
+    ReputationIncreasedEvent, UserRegisteredEvent, FaniLabError,
+};
+use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
+use shared_types::{DriverProfile, FaniLabError};
 use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env, Symbol};
 
 #[contracttype]
@@ -12,24 +17,12 @@ pub struct UserProfile {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct DriverProfile {
-    pub address: Address,
-    pub deliveries_completed: u32,
-    pub reputation_score: u32,
-    pub registered_at: u64,
-    pub kyc_verified: bool,
-}
-
-#[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
     UserProfile(Address),
     DriverProfile(Address),
     AuthorizedContract(Address),
-    DeliveryContract,
-    DisputeContract,
 }
 
 #[contracttype]
@@ -48,14 +41,7 @@ pub struct IdentityReputationContract;
 
 #[contractimpl]
 impl IdentityReputationContract {
-    pub fn init(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, FaniLabError::AlreadyInitialized);
-        }
-        env.storage().instance().set(&DataKey::Admin, &admin);
-    }
-
-    pub fn initialize(
+    pub fn init(
         env: Env,
         admin: Address,
         delivery_contract: Address,
@@ -66,12 +52,15 @@ impl IdentityReputationContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+
+        // Register the initial two authorized contracts through the allowlist so
+        // they can be revoked or rotated later without a contract migration.
         env.storage()
-            .instance()
-            .set(&DataKey::DeliveryContract, &delivery_contract);
+            .persistent()
+            .set(&DataKey::AuthorizedContract(delivery_contract), &true);
         env.storage()
-            .instance()
-            .set(&DataKey::DisputeContract, &dispute_contract);
+            .persistent()
+            .set(&DataKey::AuthorizedContract(dispute_contract), &true);
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -141,6 +130,11 @@ impl IdentityReputationContract {
         env.storage().persistent().get(&key).unwrap_or(false)
     }
 
+    pub fn has_driver_profile(env: Env, driver: Address) -> bool {
+        let key = DataKey::DriverProfile(driver);
+        env.storage().persistent().get::<_, DriverProfile>(&key).is_some()
+    }
+
     pub fn register_driver(env: Env, driver: Address) {
         driver.require_auth();
         let key = DataKey::DriverProfile(driver.clone());
@@ -160,7 +154,7 @@ impl IdentityReputationContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events()
-            .publish((Symbol::new(&env, "driver_registered"),), (driver,));
+            .publish((events::driver_registered(&env),), DriverRegisteredEvent { driver });
     }
 
     pub fn register_user(env: Env, user: Address) -> UserProfile {
@@ -182,7 +176,7 @@ impl IdentityReputationContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events()
-            .publish((Symbol::new(&env, "user_registered"),), (user,));
+            .publish((events::user_registered(&env),), UserRegisteredEvent { user });
 
         profile
     }
@@ -233,8 +227,8 @@ impl IdentityReputationContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events().publish(
-            (Symbol::new(&env, "kyc_status_updated"),),
-            (driver, kyc_verified),
+            (events::kyc_status_updated(&env),),
+            KycStatusUpdatedEvent { driver, kyc_verified },
         );
     }
 
@@ -246,18 +240,7 @@ impl IdentityReputationContract {
         weight_grams: u32,
         fragile: bool,
     ) {
-        let delivery_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::DeliveryContract)
-            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
-        let dispute_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::DisputeContract)
-            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
-
-        if caller != delivery_contract && caller != dispute_contract {
+        if !Self::is_authorized_contract(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         caller.require_auth();
@@ -284,24 +267,17 @@ impl IdentityReputationContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events().publish(
-            (Symbol::new(&env, "reputation_increased"),),
-            (driver, delivery_id, points),
+            (events::reputation_increased(&env),),
+            ReputationIncreasedEvent {
+                driver,
+                delivery_id,
+                points,
+            },
         );
     }
 
     pub fn decrease_reputation(env: Env, caller: Address, driver: Address, points: u32) {
-        let delivery_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::DeliveryContract)
-            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
-        let dispute_contract: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::DisputeContract)
-            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
-
-        if caller != delivery_contract && caller != dispute_contract {
+        if !Self::is_authorized_contract(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         caller.require_auth();
@@ -319,8 +295,8 @@ impl IdentityReputationContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events().publish(
-            (Symbol::new(&env, "reputation_decreased"),),
-            (driver, points),
+            (events::reputation_decreased(&env),),
+            ReputationDecreasedEvent { driver, points },
         );
     }
 
