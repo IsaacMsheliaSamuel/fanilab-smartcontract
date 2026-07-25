@@ -411,7 +411,7 @@ impl EscrowContract {
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         let mut record = load_escrow(&env, delivery_id);
-        if caller != record.sender && caller != record.recipient {
+        if caller != record.sender && caller != record.recipient && Some(caller.clone()) != record.driver {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         if record.status != EscrowStatus::Locked {
