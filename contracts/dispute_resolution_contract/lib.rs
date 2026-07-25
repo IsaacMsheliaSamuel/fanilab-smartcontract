@@ -7,7 +7,7 @@ use soroban_sdk::{
     Vec,
 };
 
-const DISPUTE_REPUTATION_PENALTY: u32 = 10;
+const DEFAULT_DISPUTE_REPUTATION_PENALTY: u32 = 10;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +37,7 @@ pub enum DataKey {
     IdentityReputationContract,
     DisputeTimeLimit,
     Dispute(DeliveryId),
+    DisputeReputationPenalty,
 }
 
 #[contract]
@@ -131,6 +132,23 @@ impl DisputeResolutionContract {
             .instance()
             .get(&DataKey::DisputeTimeLimit)
             .unwrap_or(0)
+    }
+
+    pub fn set_dispute_reputation_penalty(env: Env, caller: Address, penalty: u32) {
+        caller.require_auth();
+        if !Self::is_admin(env.clone(), caller.clone()) {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeReputationPenalty, &penalty);
+    }
+
+    pub fn get_dispute_reputation_penalty(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeReputationPenalty)
+            .unwrap_or(DEFAULT_DISPUTE_REPUTATION_PENALTY)
     }
 
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
@@ -277,6 +295,8 @@ impl DisputeResolutionContract {
             .driver
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
 
+        let penalty = Self::get_dispute_reputation_penalty(env.clone());
+
         if let Some(reputation_addr) = env
             .storage()
             .instance()
@@ -289,7 +309,7 @@ impl DisputeResolutionContract {
                     &env,
                     env.current_contract_address().into_val(&env),
                     driver.clone().into_val(&env),
-                    DISPUTE_REPUTATION_PENALTY.into_val(&env),
+                    penalty.into_val(&env),
                 ],
             );
         }
@@ -310,7 +330,7 @@ impl DisputeResolutionContract {
 
         env.events().publish(
             (Symbol::new(&env, "dispute_resolved_refund"), delivery_id),
-            (caller, delivery_id, driver, DISPUTE_REPUTATION_PENALTY),
+            (caller, delivery_id, driver, penalty),
         );
     }
 
