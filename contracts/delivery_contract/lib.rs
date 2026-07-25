@@ -2,7 +2,10 @@
 #![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 use shared_types::FaniLabError;
-use shared_types::{delivery_key, DeliveryMetadata, DriverProfile, StorageKey};
+use shared_types::{
+    delivery_key, events, DeliveryCreatedEvent, DeliveryConfirmedEvent, DeliveryDisputedEvent,
+    DriverAssignedEvent, DeliveryMetadata, DriverProfile, StorageKey,
+};
 pub use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Symbol,
@@ -10,11 +13,19 @@ use soroban_sdk::{
 
 // Local DeliveryMetadata removed in favor of shared_types::DeliveryMetadata
 
+/// Maximum deliveries per batch to stay within Soroban resource limits.
+pub const MAX_BATCH_SIZE: u32 = 100;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     DeliveryCounter,
     EscrowContract,
+    /// Secondary index: deliveries created by sender (Vec<DeliveryId>).
+    DeliveriesBySender(Address),
+    /// Secondary index: deliveries with recipient (Vec<DeliveryId>).
+    DeliveriesByRecipient(Address),
+    IdentityReputationContract,
 }
 
 #[contracterror]
@@ -22,6 +33,12 @@ pub enum DataKey {
 #[repr(u32)]
 pub enum DeliveryError {
     InvalidState = 1,
+    InvalidMetadata = 2,
+}
+
+mod constants {
+    pub const MAX_LOCATION_LEN: u32 = 256;
+    pub const MAX_WEIGHT_GRAMS: u32 = 1_000_000;
 }
 
 /// Validate whether a status transition is permitted by the delivery state machine.
@@ -32,7 +49,7 @@ pub enum DeliveryError {
 ///   InTransit → Delivered, Disputed
 ///   Disputed  → Delivered, Cancelled
 ///   Delivered, Cancelled → (terminal, no transitions)
-pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(), DeliveryError> {
+pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(), FaniLabError> {
     let valid = match (from, to) {
         (DeliveryStatus::Pending, DeliveryStatus::Active) => true,
         (DeliveryStatus::Pending, DeliveryStatus::Cancelled) => true,
@@ -48,8 +65,21 @@ pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(
     if valid {
         Ok(())
     } else {
-        Err(DeliveryError::InvalidState)
+        Err(FaniLabError::InvalidState)
     }
+}
+
+fn validate_delivery_metadata(env: &Env, metadata: &DeliveryMetadata) -> Result<(), DeliveryError> {
+    if metadata.origin.len() > constants::MAX_LOCATION_LEN {
+        return Err(DeliveryError::InvalidMetadata);
+    }
+    if metadata.destination.len() > constants::MAX_LOCATION_LEN {
+        return Err(DeliveryError::InvalidMetadata);
+    }
+    if metadata.cargo_description.weight_grams > constants::MAX_WEIGHT_GRAMS {
+        return Err(DeliveryError::InvalidMetadata);
+    }
+    Ok(())
 }
 
 #[contract]
@@ -75,6 +105,31 @@ impl DeliveryContract {
         );
     }
 
+    pub fn set_identity_reputation_contract(
+        env: Env,
+        admin: Address,
+        identity_contract: Address,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityReputationContract, &identity_contract);
+    }
+
+    pub fn get_identity_reputation_contract(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::IdentityReputationContract)
+    }
+
     pub fn create_delivery(
         env: Env,
         sender: Address,
@@ -82,6 +137,9 @@ impl DeliveryContract {
         metadata: DeliveryMetadata,
     ) -> DeliveryId {
         sender.require_auth();
+
+        validate_delivery_metadata(&env, &metadata)
+            .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
 
         let mut counter: u64 = env
             .storage()
@@ -98,7 +156,7 @@ impl DeliveryContract {
         let record = DeliveryRecord {
             delivery_id,
             sender: sender.clone(),
-            recipient,
+            recipient: recipient.clone(),
             driver: None,
             status: DeliveryStatus::Pending,
             metadata,
@@ -111,12 +169,131 @@ impl DeliveryContract {
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
+        // Update secondary indexes.
+        let sender_key = DataKey::DeliveriesBySender(sender.clone());
+        let mut sender_deliveries: soroban_sdk::Vec<DeliveryId> = env
+            .storage()
+            .persistent()
+            .get(&sender_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        sender_deliveries.push_back(delivery_id);
+        env.storage()
+            .persistent()
+            .set(&sender_key, &sender_deliveries);
+        env.storage().persistent().extend_ttl(&sender_key, 518400, 518400);
+
+        let recipient_key = DataKey::DeliveriesByRecipient(recipient.clone());
+        let mut recipient_deliveries: soroban_sdk::Vec<DeliveryId> = env
+            .storage()
+            .persistent()
+            .get(&recipient_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        recipient_deliveries.push_back(delivery_id);
+        env.storage()
+            .persistent()
+            .set(&recipient_key, &recipient_deliveries);
+        env.storage().persistent().extend_ttl(&recipient_key, 518400, 518400);
+
         env.events().publish(
-            (soroban_sdk::Symbol::new(&env, "delivery_created"),),
-            (delivery_id, sender),
+            (events::delivery_created(&env),),
+            DeliveryCreatedEvent {
+                delivery_id: delivery_id.value(),
+                sender,
+                amount: 0,
+            },
         );
 
         delivery_id
+    }
+
+    /// Create multiple deliveries in a single transaction.  Sender must authorize.
+    /// Returns Vec of created delivery IDs.  Each delivery funds escrow individually
+    /// via cross-contract calls to the escrow contract.
+    pub fn create_deliveries_batch(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        metadata_list: soroban_sdk::Vec<DeliveryMetadata>,
+    ) -> soroban_sdk::Vec<DeliveryId> {
+        sender.require_auth();
+
+        if metadata_list.len() > MAX_BATCH_SIZE as u32 {
+            panic!("BatchTooLarge");
+        }
+
+        let mut result = soroban_sdk::Vec::new(&env);
+        let mut counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DeliveryCounter)
+            .unwrap_or(0);
+
+        let timestamp = env.ledger().timestamp();
+
+        // Pre-load sender and recipient indexes for efficient batch updates.
+        let sender_key = DataKey::DeliveriesBySender(sender.clone());
+        let mut sender_deliveries: soroban_sdk::Vec<DeliveryId> = env
+            .storage()
+            .persistent()
+            .get(&sender_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+
+        let recipient_key = DataKey::DeliveriesByRecipient(recipient.clone());
+        let mut recipient_deliveries: soroban_sdk::Vec<DeliveryId> = env
+            .storage()
+            .persistent()
+            .get(&recipient_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+
+        for i in 0..metadata_list.len() {
+            if let Some(metadata) = metadata_list.get(i) {
+                counter += 1;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::DeliveryCounter, &counter);
+
+                let delivery_id = DeliveryId::from(counter);
+
+                let record = DeliveryRecord {
+                    delivery_id,
+                    sender: sender.clone(),
+                    recipient: recipient.clone(),
+                    driver: None,
+                    status: DeliveryStatus::Pending,
+                    metadata,
+                    created_at: timestamp,
+                    delivered_at: None,
+                    transit_started_at: None,
+                };
+
+                let key = delivery_key(delivery_id);
+                env.storage().persistent().set(&key, &record);
+                env.storage().persistent().extend_ttl(&key, 518400, 518400);
+
+                sender_deliveries.push_back(delivery_id);
+                recipient_deliveries.push_back(delivery_id);
+
+                env.events().publish(
+                    (soroban_sdk::Symbol::new(&env, "delivery_created"),),
+                    (delivery_id, sender.clone()),
+                );
+
+                result.push_back(delivery_id);
+            }
+        }
+
+        // Save updated indexes.
+        env.storage()
+            .persistent()
+            .set(&sender_key, &sender_deliveries);
+        env.storage().persistent().extend_ttl(&sender_key, 518400, 518400);
+
+        env.storage()
+            .persistent()
+            .set(&recipient_key, &recipient_deliveries);
+        env.storage().persistent().extend_ttl(&recipient_key, 518400, 518400);
+
+        result
     }
 
     pub fn cancel_delivery(env: Env, sender: Address, delivery_id: DeliveryId) {
@@ -127,20 +304,20 @@ impl DeliveryContract {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic!("DeliveryNotFound"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
 
         if delivery.sender != sender {
-            panic!("NotAuthorized");
+            panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
         validate_transition(delivery.status.clone(), DeliveryStatus::Cancelled)
-            .unwrap_or_else(|_| panic!("InvalidState"));
+            .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let escrow_address: Address = env
             .storage()
             .instance()
             .get(&DataKey::EscrowContract)
-            .unwrap_or_else(|| panic!("EscrowNotConfigured"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
 
         use soroban_sdk::IntoVal;
         let _: () = env.invoke_contract(
@@ -158,7 +335,7 @@ impl DeliveryContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events().publish(
-            (soroban_sdk::Symbol::new(&env, "delivery_cancelled"),),
+            (events::delivery_cancelled(&env),),
             (delivery_id, sender),
         );
     }
@@ -170,7 +347,7 @@ impl DeliveryContract {
         let is_self_assignment = caller == driver;
 
         if !is_admin && !is_self_assignment {
-            panic!("NotAuthorized");
+            panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
         let key = delivery_key(delivery_id);
@@ -178,10 +355,14 @@ impl DeliveryContract {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic!("DeliveryNotFound"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
+
+        if driver == delivery.sender || driver == delivery.recipient {
+            panic!("InvalidDriver");
+        }
 
         validate_transition(delivery.status.clone(), DeliveryStatus::Active)
-            .unwrap_or_else(|_| panic!("InvalidState"));
+            .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         delivery.driver = Some(driver.clone());
         delivery.status = DeliveryStatus::Active;
@@ -190,8 +371,11 @@ impl DeliveryContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events().publish(
-            (Symbol::new(&env, "driver_assigned"),),
-            (delivery_id, driver),
+            (events::driver_assigned(&env),),
+            DriverAssignedEvent {
+                delivery_id: delivery_id.value(),
+                driver,
+            },
         );
     }
 
@@ -205,16 +389,16 @@ impl DeliveryContract {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic!("DeliveryNotFound"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
 
         // Verify caller is the assigned driver for this delivery
         match &delivery.driver {
             Some(assigned) if *assigned == driver => {}
-            _ => panic!("NotAuthorized"),
+            _ => panic_with_error!(&env, FaniLabError::Unauthorized),
         }
 
         validate_transition(delivery.status.clone(), DeliveryStatus::InTransit)
-            .unwrap_or_else(|_| panic!("InvalidState"));
+            .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let timestamp = env.ledger().timestamp();
         delivery.status = DeliveryStatus::InTransit;
@@ -224,7 +408,7 @@ impl DeliveryContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events().publish(
-            (Symbol::new(&env, "DeliveryInTransit"),),
+            (events::delivery_in_transit(&env),),
             (delivery_id, driver, timestamp),
         );
     }
@@ -237,25 +421,31 @@ impl DeliveryContract {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic!("DeliveryNotFound"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
 
         if recipient != delivery.recipient {
-            panic!("NotAuthorized");
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+
+        if let Some(driver) = &delivery.driver {
+            if driver == &recipient || driver == &delivery.sender {
+                panic!("InvalidDelivery");
+            }
         }
 
         validate_transition(delivery.status.clone(), DeliveryStatus::Delivered)
-            .unwrap_or_else(|_| panic!("InvalidState"));
+            .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let escrow_address: Address = env
             .storage()
             .instance()
             .get(&DataKey::EscrowContract)
-            .unwrap_or_else(|| panic!("EscrowNotConfigured"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
 
         use soroban_sdk::IntoVal;
         let _: () = env.invoke_contract(
             &escrow_address,
-            &soroban_sdk::Symbol::new(&env, "release_escrow"),
+            &soroban_sdk::Symbol::new(&env, "mark_holdback_escrow"),
             soroban_sdk::vec![
                 &env,
                 recipient.into_val(&env),
@@ -270,31 +460,30 @@ impl DeliveryContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         if let Some(driver_addr) = &delivery.driver {
-            let driver_key = StorageKey::DriverProfile(driver_addr.clone());
-            let mut profile: DriverProfile = env
-                .storage()
-                .persistent()
-                .get(&driver_key)
-                .unwrap_or_else(|| DriverProfile {
-                    address: driver_addr.clone(),
-                    deliveries_completed: 0,
-                    reputation_score: 0,
-                    registered_at: env.ledger().timestamp(),
-                    kyc_verified: false,
-                });
-
-            profile.deliveries_completed += 1;
-            profile.reputation_score += 1;
-
-            env.storage().persistent().set(&driver_key, &profile);
-            env.storage()
-                .persistent()
-                .extend_ttl(&driver_key, 518400, 518400);
+            if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
+                let cargo_desc = &delivery.metadata.cargo_description;
+                let _: () = env.invoke_contract(
+                    &identity_contract,
+                    &Symbol::new(&env, "increase_reputation"),
+                    soroban_sdk::vec![
+                        &env,
+                        env.current_contract_address().into_val(&env),
+                        driver_addr.into_val(&env),
+                        u64::from(delivery_id).into_val(&env),
+                        cargo_desc.weight_grams.into_val(&env),
+                        cargo_desc.fragile.into_val(&env),
+                    ],
+                );
+            }
         }
 
         env.events().publish(
-            (soroban_sdk::Symbol::new(&env, "delivery_confirmed"),),
-            (delivery_id, recipient),
+            (events::delivery_confirmed(&env),),
+            DeliveryConfirmedEvent {
+                delivery_id: delivery_id.value(),
+                recipient,
+                timestamp: delivery.delivered_at.unwrap_or(0),
+            },
         );
     }
 
@@ -309,22 +498,22 @@ impl DeliveryContract {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic!("DeliveryNotFound"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
 
         let is_sender = caller == delivery.sender;
         let is_recipient = caller == delivery.recipient;
         if !is_sender && !is_recipient {
-            panic!("NotAuthorized");
+            panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
         validate_transition(delivery.status.clone(), DeliveryStatus::Disputed)
-            .unwrap_or_else(|_| panic!("InvalidState"));
+            .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let escrow_address: Address = env
             .storage()
             .instance()
             .get(&DataKey::EscrowContract)
-            .unwrap_or_else(|| panic!("EscrowNotConfigured"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
 
         // Cross-contract call first: if escrow raises dispute fails, delivery
         // state is not mutated (implicit rollback via propagated panic).
@@ -346,8 +535,12 @@ impl DeliveryContract {
         env.storage().persistent().extend_ttl(&key, 518400, 518400);
 
         env.events().publish(
-            (Symbol::new(&env, "delivery_disputed"),),
-            (delivery_id, caller, timestamp),
+            (events::delivery_disputed(&env),),
+            DeliveryDisputedEvent {
+                delivery_id: delivery_id.value(),
+                reporter: caller,
+                timestamp,
+            },
         );
     }
 
@@ -382,7 +575,78 @@ impl DeliveryContract {
         env.storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| panic!("DeliveryNotFound"))
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound))
+    }
+
+    /// Returns combined delivery and escrow state, and flags known-invalid combinations.
+    /// Validates that delivery and escrow states are synchronized according to protocol invariants.
+    pub fn get_combined_state(
+        env: Env,
+        delivery_id: DeliveryId,
+    ) -> (DeliveryRecord, shared_types::EscrowRecord, bool) {
+        let delivery = Self::get_delivery(env.clone(), delivery_id);
+
+        let escrow_address: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .unwrap_or_else(|| panic!("EscrowNotConfigured"));
+
+        use soroban_sdk::IntoVal;
+        let escrow: shared_types::EscrowRecord = env.invoke_contract(
+            &escrow_address,
+            &Symbol::new(&env, "get_escrow"),
+            soroban_sdk::vec![&env, u64::from(delivery_id).into_val(&env)],
+        );
+
+        let is_synchronized = Self::validate_state_sync(&delivery, &escrow);
+        (delivery, escrow, is_synchronized)
+    }
+
+    /// Validates that delivery and escrow states match expected protocol invariants.
+    /// Returns true if states are synchronized, false if a mismatch is detected.
+    fn validate_state_sync(
+        delivery: &DeliveryRecord,
+        escrow: &shared_types::EscrowRecord,
+    ) -> bool {
+        match (&delivery.status, &escrow.status) {
+            // Pending/Active: escrow should be Locked
+            (DeliveryStatus::Pending, shared_types::EscrowStatus::Locked) => true,
+            (DeliveryStatus::Active, shared_types::EscrowStatus::Locked) => true,
+
+            // InTransit: escrow should still be Locked
+            (DeliveryStatus::InTransit, shared_types::EscrowStatus::Locked) => true,
+
+            // Delivered: escrow must be Released (funds moved to driver)
+            (DeliveryStatus::Delivered, shared_types::EscrowStatus::Released) => true,
+
+            // Disputed: escrow must be Paused
+            (DeliveryStatus::Disputed, shared_types::EscrowStatus::Paused) => true,
+
+            // Cancelled: escrow should be Refunded
+            (DeliveryStatus::Cancelled, shared_types::EscrowStatus::Refunded) => true,
+
+            // Any other combination is a mismatch
+            _ => false,
+        }
+    }
+
+    /// Get all delivery IDs created by a sender.
+    pub fn get_deliveries_by_sender(env: Env, sender: Address) -> soroban_sdk::Vec<DeliveryId> {
+        let key = DataKey::DeliveriesBySender(sender);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    /// Get all delivery IDs with a specific recipient.
+    pub fn get_deliveries_by_recipient(env: Env, recipient: Address) -> soroban_sdk::Vec<DeliveryId> {
+        let key = DataKey::DeliveriesByRecipient(recipient);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
     }
 }
 
