@@ -13,10 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: `cargo machete` step to detect unused dependencies automatically
 - CI: `cargo outdated` step is now a hard gate (removed `continue-on-error`)
 - `identity_reputation_contract::has_driver_profile` query function for driver existence checks
+- `shared_types::ttl` constants (`LEDGER_TTL_THRESHOLD`, `LEDGER_TTL_EXTEND_TO`) now used by `delivery_contract`, `dispute_resolution_contract`, `identity_reputation_contract`, and `fleet_management_contract` instead of hand-typed `518400, 518400` literals at every `extend_ttl` call site
+- `fleet_management_contract::confirm_fleet_treasury_update` and `get_pending_treasury_update` to support a timelocked treasury change flow
 
 ### Changed
 - `escrow_contract::create_escrow` now validates `token` matches the protocol-configured token
 - `fleet_management_contract::register_fleet` checks driver profile existence before calling `register_driver`, preventing panic for already-registered drivers
+- `fleet_management_contract::update_fleet_treasury` now only *proposes* a treasury change; it takes effect only after a 3-day timelock and an explicit `confirm_fleet_treasury_update` call, giving active drivers advance notice via the new `fleet_treasury_change_proposed` event
+- `settlement_contract` source moved from `src/lib.rs` to the flat `lib.rs` layout used by the other five contracts, for structural consistency
+- Replaced the crate-level `#![allow(deprecated)]` in all six contracts with `#[allow(deprecated)]` scoped to the individual functions that call the deprecated `events().publish()`, so future unrelated deprecations are no longer silently suppressed
 
 ### Removed
 - `escrow_contract::get_status` — dead stub that always returned `DeliveryStatus::Pending`. Use `get_escrow(id).status` instead.

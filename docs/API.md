@@ -910,21 +910,17 @@ Retrieve fleet profile.
 - `FleetNotFound` - No fleet with that ID exists
 
 #### `update_fleet_treasury`
-Update the treasury wallet for an existing fleet.
+Propose a new treasury wallet for an existing fleet. Does **not** take effect
+immediately — the change becomes eligible for confirmation only after
+`TREASURY_CHANGE_TIMELOCK_SECONDS` (3 days) have elapsed, giving active
+drivers advance notice before their future payouts are redirected. Calling
+this again before confirmation overwrites the pending change and restarts
+the timelock.
 
 **Parameters:**
 - `owner: Address` - Fleet owner (must sign)
 - `fleet_id: FleetId` - Fleet identifier
-- `treasury: Address` - New treasury wallet address
-- `FleetNotFound` - Invalid fleet_id
-
-#### `update_fleet_treasury`
-Update treasury wallet for a fleet.
-
-**Parameters:**
-- `owner: Address` - Fleet owner (caller)
-- `fleet_id: FleetId` - Fleet identifier
-- `treasury: Address` - New treasury address
+- `treasury: Address` - Proposed new treasury wallet address
 
 **Authorization:** Fleet owner
 
@@ -932,7 +928,33 @@ Update treasury wallet for a fleet.
 - `FleetNotFound` - No fleet with that ID exists
 - `Unauthorized` - Caller is not the fleet owner
 
-**Events:** `fleet_treasury_updated`
+**Events:** `fleet_treasury_change_proposed` (emitted immediately, on proposal)
+
+#### `confirm_fleet_treasury_update`
+Apply a previously proposed treasury change once its timelock has elapsed.
+Callable by anyone — the security guarantee is the elapsed delay, not caller
+identity (mirrors `reclaim_expired_escrow`'s permissionless finalization
+pattern).
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+
+**Errors:**
+- `NoPendingTreasuryChange` - No treasury change has been proposed for this fleet
+- `TimelockNotElapsed` - The proposal's timelock has not yet elapsed
+- `FleetNotFound` - No fleet with that ID exists
+
+**Events:** `fleet_treasury_updated` (emitted on confirmation, once the change takes effect)
+
+#### `get_pending_treasury_update`
+Return the pending treasury change for a fleet, if any, so off-chain clients
+(e.g. driver apps) can display the upcoming payout redirect and its
+activation time.
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+
+**Returns:** `Option<PendingTreasuryChange>`
 
 ### Driver Management
 

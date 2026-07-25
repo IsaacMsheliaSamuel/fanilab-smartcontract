@@ -1,8 +1,7 @@
 #![no_std]
-#![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 use shared_types::{
-    events, DriverRegisteredEvent, KycStatusUpdatedEvent, ReputationDecreasedEvent,
+    events, ttl, DriverRegisteredEvent, KycStatusUpdatedEvent, ReputationDecreasedEvent,
     ReputationIncreasedEvent, UserRegisteredEvent, FaniLabError,
 };
 use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
@@ -176,6 +175,7 @@ impl IdentityReputationContract {
         env.storage().persistent().get::<_, DriverProfile>(&key).is_some()
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn register_driver(env: Env, driver: Address) {
         driver.require_auth();
         let key = DataKey::DriverProfile(driver.clone());
@@ -192,12 +192,17 @@ impl IdentityReputationContract {
         };
 
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events()
             .publish((events::driver_registered(&env),), DriverRegisteredEvent { driver });
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn register_user(env: Env, user: Address) -> UserProfile {
         user.require_auth();
 
@@ -214,7 +219,11 @@ impl IdentityReputationContract {
         }
 
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events()
             .publish((events::user_registered(&env),), UserRegisteredEvent { user });
@@ -242,6 +251,7 @@ impl IdentityReputationContract {
         profile
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn update_driver_kyc_status(env: Env, admin: Address, driver: Address, kyc_verified: bool) {
         admin.require_auth();
 
@@ -265,7 +275,11 @@ impl IdentityReputationContract {
         profile.kyc_verified = kyc_verified;
 
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::kyc_status_updated(&env),),
@@ -273,6 +287,7 @@ impl IdentityReputationContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn increase_reputation(
         env: Env,
         caller: Address,
@@ -307,7 +322,11 @@ impl IdentityReputationContract {
         profile.deliveries_completed += 1;
 
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::reputation_increased(&env),),
@@ -319,6 +338,7 @@ impl IdentityReputationContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn decrease_reputation(env: Env, caller: Address, driver: Address, points: u32) {
         if !Self::is_authorized_contract(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
@@ -335,7 +355,11 @@ impl IdentityReputationContract {
         profile.reputation_score = profile.reputation_score.saturating_sub(points);
 
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::reputation_decreased(&env),),

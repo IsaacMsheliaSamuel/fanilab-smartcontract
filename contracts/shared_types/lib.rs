@@ -91,6 +91,10 @@ pub mod events {
         Symbol::new(env, "fleet_treasury_updated")
     }
 
+    pub fn fleet_treasury_change_proposed(env: &Env) -> Symbol {
+        Symbol::new(env, "fleet_treasury_change_proposed")
+    }
+
     pub fn driver_invited(env: &Env) -> Symbol {
         Symbol::new(env, "driver_invited")
     }
@@ -261,6 +265,21 @@ pub struct FleetTreasuryUpdatedEvent {
     pub owner: Address,
     /// New treasury wallet address.
     pub treasury: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetTreasuryChangeProposedEvent {
+    /// Fleet identifier whose treasury change was proposed.
+    pub fleet_id: u64,
+    /// Fleet owner address that proposed the change.
+    pub owner: Address,
+    /// Current (still-active) treasury wallet address.
+    pub current_treasury: Address,
+    /// Proposed new treasury wallet address.
+    pub proposed_treasury: Address,
+    /// Ledger timestamp after which the change may be confirmed.
+    pub activates_at: u64,
 }
 
 #[contracttype]
@@ -525,10 +544,9 @@ mod test {
         DisputeRaisedEvent, DisputeResolvedEvent, DisputeResolvedPayoutEvent,
         DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, DriverAssignedEvent,
         DriverInvitedEvent, DriverRegisteredEvent, DriverRemovedEvent, EscrowFundedEvent,
-        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError,
-        FleetRegisteredEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
-        KycStatusUpdatedEvent, PartyAddresses, ReputationDecreasedEvent,
-        ReputationIncreasedEvent, StorageKey, UserRegisteredEvent,
+        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError, FleetRegisteredEvent,
+        FleetTreasuryUpdatedEvent, InviteAcceptedEvent, KycStatusUpdatedEvent, PartyAddresses,
+        ReputationDecreasedEvent, ReputationIncreasedEvent, StorageKey, UserRegisteredEvent,
     };
     use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
