@@ -41,7 +41,9 @@ pub enum DriverTier {
 }
 
 const MAX_REPUTATION: u32 = 100;
-const ENTERPRISE_THRESHOLD: u32 = 75;
+const GOLD_TIER_THRESHOLD: u32 = 75;
+// Enterprise eligibility is intentionally tied to reaching the Gold tier.
+const ENTERPRISE_THRESHOLD: u32 = GOLD_TIER_THRESHOLD;
 
 #[contract]
 pub struct IdentityReputationContract;
@@ -291,7 +293,7 @@ impl IdentityReputationContract {
     pub fn get_driver_tier(env: Env, driver: Address) -> DriverTier {
         let profile = Self::get_driver_profile(env, driver);
         let score = profile.reputation_score;
-        if score >= 75 {
+        if score >= GOLD_TIER_THRESHOLD {
             DriverTier::Gold
         } else if score >= 50 {
             DriverTier::Silver
