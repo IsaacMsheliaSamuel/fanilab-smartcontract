@@ -3,7 +3,7 @@ extern crate std;
 use super::*;
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol};
 
-// ── Mock Escrow Contract with call tracking ───────────────────────────────────
+// ── Mock Escrow Contract with call tracking and failure simulation ───────────────────────────────────
 
 #[contract]
 pub struct MockEscrowContract;
@@ -11,18 +11,36 @@ pub struct MockEscrowContract;
 #[contractimpl]
 impl MockEscrowContract {
     pub fn refund_escrow(_env: Env, _caller: Address, delivery_id: u64) {
+        if delivery_id == 9999 {
+            panic!("MockEscrowFailure");
+        }
         _env.storage()
             .temporary()
             .set(&Symbol::new(&_env, "refunded"), &delivery_id);
     }
 
+    pub fn mark_holdback_escrow(_env: Env, _caller: Address, delivery_id: u64) {
+        if delivery_id == 9999 {
+            panic!("MockEscrowFailure");
+        }
+        _env.storage()
+            .temporary()
+            .set(&Symbol::new(&_env, "released"), &delivery_id);
+    }
+
     pub fn release_escrow(_env: Env, _caller: Address, delivery_id: u64) {
+        if delivery_id == 9999 {
+            panic!("MockEscrowFailure");
+        }
         _env.storage()
             .temporary()
             .set(&Symbol::new(&_env, "released"), &delivery_id);
     }
 
     pub fn raise_dispute(_env: Env, _caller: Address, delivery_id: u64) {
+        if delivery_id == 9999 {
+            panic!("MockEscrowFailure");
+        }
         _env.storage()
             .temporary()
             .set(&Symbol::new(&_env, "disputed"), &delivery_id);
@@ -94,6 +112,22 @@ fn get_test_metadata(env: &Env, delivery_id: u64) -> DeliveryMetadata {
         },
         created_at: env.ledger().timestamp(),
         estimated_delivery: env.ledger().timestamp() + 86400,
+    }
+}
+
+fn get_test_metadata_with_estimate(env: &Env, delivery_id: u64, estimated_delivery: u64) -> DeliveryMetadata {
+    use shared_types::{CargoCategory, CargoDescriptor};
+    DeliveryMetadata {
+        delivery_id,
+        origin: String::from_str(env, "Origin"),
+        destination: String::from_str(env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery,
     }
 }
 
@@ -381,29 +415,6 @@ fn test_dispute_then_resolve_penalizes_driver() {
     );
 }
 
-#[test]
-fn test_create_delivery_missing_fields() {
-    let env = Env::default();
-    let (client, shipper, _, recipient, _, _) = setup_full(&env);
-
-    use shared_types::{CargoCategory, CargoDescriptor};
-    let metadata = DeliveryMetadata {
-        delivery_id: 1,
-        origin: String::from_str(&env, ""),
-        destination: String::from_str(&env, ""),
-        cargo_description: CargoDescriptor {
-            weight_grams: 0,
-            category: CargoCategory::General,
-            fragile: false,
-        },
-        created_at: env.ledger().timestamp(),
-        estimated_delivery: env.ledger().timestamp() + 86400,
-    };
-
-    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
-    assert_eq!(delivery_id, 1);
-}
-
 // ── SELF-ASSIGNMENT REJECTION (Issue #20) ─────────────────────────────────
 
 #[test]
@@ -474,7 +485,110 @@ fn test_get_combined_state_active_delivery() {
 fn test_get_combined_state_in_transit_delivery() {
     let env = Env::default();
     let (client, shipper, driver, recipient, escrow_id, _) = setup_full(&env);
-// ── METADATA VALIDATION ───────────────────────────────────────────────────────
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    let (delivery, _escrow, is_synchronized) = client.get_combined_state(&delivery_id);
+
+    assert_eq!(delivery.status, DeliveryStatus::InTransit);
+    assert!(is_synchronized, "InTransit delivery should be synchronized with escrow");
+}
+
+// ── METADATA VALIDATION (Issue #96 - empty origin/destination and zero weight) ───────────────────
+
+#[test]
+#[should_panic(expected = "InvalidMetadata")]
+fn test_reject_empty_origin() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, ""),
+        destination: String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+
+    client.create_delivery(&shipper, &recipient, &metadata);
+}
+
+#[test]
+#[should_panic(expected = "InvalidMetadata")]
+fn test_reject_empty_destination() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "Origin"),
+        destination: String::from_str(&env, ""),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+
+    client.create_delivery(&shipper, &recipient, &metadata);
+}
+
+#[test]
+#[should_panic(expected = "InvalidMetadata")]
+fn test_reject_zero_weight() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "Origin"),
+        destination: String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 0,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+
+    client.create_delivery(&shipper, &recipient, &metadata);
+}
+
+#[test]
+#[should_panic(expected = "InvalidMetadata")]
+fn test_reject_empty_origin_and_destination_and_zero_weight() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, ""),
+        destination: String::from_str(&env, ""),
+        cargo_description: CargoDescriptor {
+            weight_grams: 0,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+
+    client.create_delivery(&shipper, &recipient, &metadata);
+}
 
 #[test]
 #[should_panic(expected = "InvalidMetadata")]
@@ -592,6 +706,31 @@ fn test_accept_weight_at_max() {
 
     let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
     assert_eq!(delivery_id, 1);
+}
+
+#[test]
+fn test_accept_minimum_valid_weight() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "Origin"),
+        destination: String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 1,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    assert_eq!(delivery_id, 1);
+}
+
 #[test]
 fn test_confirm_delivery_calls_increase_reputation() {
     let env = Env::default();
@@ -601,10 +740,6 @@ fn test_confirm_delivery_calls_increase_reputation() {
     client.assign_driver(&driver, &delivery_id, &driver);
     client.mark_in_transit(&driver, &delivery_id);
 
-    let (delivery, _escrow, is_synchronized) = client.get_combined_state(&delivery_id);
-
-    assert_eq!(delivery.status, DeliveryStatus::InTransit);
-    assert!(is_synchronized, "InTransit delivery should be synchronized with escrow");
     client.confirm_delivery(&recipient, &delivery_id);
 
     let delivery = client.get_delivery(&delivery_id);
@@ -620,4 +755,114 @@ fn test_confirm_delivery_calls_increase_reputation() {
         stored_driver, driver,
         "Expected reputation increase to be called for driver on delivery confirmation"
     );
+}
+
+// ── ISSUE #95: State Rollback on Escrow Failure Tests ─────────────────────────
+
+#[test]
+#[should_panic(expected = "MockEscrowFailure")]
+fn test_confirm_delivery_state_rollback_on_escrow_failure() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata_with_estimate(&env, 9999, env.ledger().timestamp() + 86400);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    // This should panic due to escrow failure (delivery_id 9999)
+    client.confirm_delivery(&recipient, &delivery_id);
+}
+
+#[test]
+fn test_delivery_state_unchanged_after_confirm_escrow_failure() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata_with_estimate(&env, 9999, env.ledger().timestamp() + 86400);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    let delivery_before = client.get_delivery(&delivery_id);
+    assert_eq!(delivery_before.status, DeliveryStatus::InTransit);
+    assert_eq!(delivery_before.delivered_at, None);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.confirm_delivery(&recipient, &delivery_id);
+    }));
+
+    assert!(result.is_err(), "Expected confirm_delivery to panic");
+
+    let delivery_after = client.get_delivery(&delivery_id);
+    assert_eq!(delivery_after.status, DeliveryStatus::InTransit, "Delivery status should not change");
+    assert_eq!(delivery_after.delivered_at, None, "Delivered_at should remain None");
+}
+
+#[test]
+#[should_panic(expected = "MockEscrowFailure")]
+fn test_cancel_delivery_state_rollback_on_escrow_failure() {
+    let env = Env::default();
+    let (client, shipper, driver, _, _, _) = setup_full(&env);
+    let metadata = get_test_metadata_with_estimate(&env, 9999, env.ledger().timestamp() + 86400);
+    let delivery_id = client.create_delivery(&shipper, &metadata, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+
+    // This should panic due to escrow failure (delivery_id 9999)
+    client.cancel_delivery(&shipper, &delivery_id);
+}
+
+#[test]
+fn test_delivery_state_unchanged_after_cancel_escrow_failure() {
+    let env = Env::default();
+    let (client, shipper, driver, _, _, _) = setup_full(&env);
+    let metadata = get_test_metadata_with_estimate(&env, 9999, env.ledger().timestamp() + 86400);
+    let delivery_id = client.create_delivery(&shipper, &metadata, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+
+    let delivery_before = client.get_delivery(&delivery_id);
+    assert_eq!(delivery_before.status, DeliveryStatus::Active);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.cancel_delivery(&shipper, &delivery_id);
+    }));
+
+    assert!(result.is_err(), "Expected cancel_delivery to panic");
+
+    let delivery_after = client.get_delivery(&delivery_id);
+    assert_eq!(delivery_after.status, DeliveryStatus::Active, "Delivery status should not change");
+}
+
+#[test]
+#[should_panic(expected = "MockEscrowFailure")]
+fn test_raise_dispute_state_rollback_on_escrow_failure() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata_with_estimate(&env, 9999, env.ledger().timestamp() + 86400);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    // This should panic due to escrow failure (delivery_id 9999)
+    client.raise_dispute(&shipper, &delivery_id);
+}
+
+#[test]
+fn test_delivery_state_unchanged_after_raise_dispute_escrow_failure() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata_with_estimate(&env, 9999, env.ledger().timestamp() + 86400);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    let delivery_before = client.get_delivery(&delivery_id);
+    assert_eq!(delivery_before.status, DeliveryStatus::InTransit);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.raise_dispute(&shipper, &delivery_id);
+    }));
+
+    assert!(result.is_err(), "Expected raise_dispute to panic");
+
+    let delivery_after = client.get_delivery(&delivery_id);
+    assert_eq!(delivery_after.status, DeliveryStatus::InTransit, "Delivery status should not change to Disputed");
 }

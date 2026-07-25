@@ -70,13 +70,13 @@ pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(
 }
 
 fn validate_delivery_metadata(env: &Env, metadata: &DeliveryMetadata) -> Result<(), DeliveryError> {
-    if metadata.origin.len() > constants::MAX_LOCATION_LEN {
+    if metadata.origin.len() == 0 || metadata.origin.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
-    if metadata.destination.len() > constants::MAX_LOCATION_LEN {
+    if metadata.destination.len() == 0 || metadata.destination.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
-    if metadata.cargo_description.weight_grams > constants::MAX_WEIGHT_GRAMS {
+    if metadata.cargo_description.weight_grams == 0 || metadata.cargo_description.weight_grams > constants::MAX_WEIGHT_GRAMS {
         return Err(DeliveryError::InvalidMetadata);
     }
     Ok(())
