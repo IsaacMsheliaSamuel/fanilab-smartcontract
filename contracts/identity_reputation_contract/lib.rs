@@ -17,12 +17,33 @@ pub struct UserProfile {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DriverProfile {
+    pub address: Address,
+    pub deliveries_completed: u32,
+    pub reputation_score: u32,
+    pub registered_at: u64,
+    pub kyc_verified: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReputationConfig {
+    pub base_points: u32,
+    pub heavy_cargo_points: u32,
+    pub fragile_points: u32,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
     UserProfile(Address),
     DriverProfile(Address),
     AuthorizedContract(Address),
+    DeliveryContract,
+    DisputeContract,
+    ReputationConfig,
 }
 
 #[contracttype]
@@ -35,6 +56,10 @@ pub enum DriverTier {
 
 const MAX_REPUTATION: u32 = 100;
 const ENTERPRISE_THRESHOLD: u32 = 75;
+const HEAVY_CARGO_GRAMS: u32 = 5000;
+const DEFAULT_BASE_POINTS: u32 = 5;
+const DEFAULT_HEAVY_CARGO_POINTS: u32 = 3;
+const DEFAULT_FRAGILE_POINTS: u32 = 2;
 
 #[contract]
 pub struct IdentityReputationContract;
@@ -89,6 +114,7 @@ impl IdentityReputationContract {
         }
     }
 
+    pub fn set_reputation_config(env: Env, admin: Address, config: ReputationConfig) {
     pub fn set_delivery_contract(env: Env, admin: Address, delivery_contract: Address) {
         admin.require_auth();
         let stored_admin = Self::get_admin(env.clone());
@@ -97,6 +123,18 @@ impl IdentityReputationContract {
         }
         env.storage()
             .instance()
+            .set(&DataKey::ReputationConfig, &config);
+    }
+
+    pub fn get_reputation_config(env: Env) -> ReputationConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReputationConfig)
+            .unwrap_or(ReputationConfig {
+                base_points: DEFAULT_BASE_POINTS,
+                heavy_cargo_points: DEFAULT_HEAVY_CARGO_POINTS,
+                fragile_points: DEFAULT_FRAGILE_POINTS,
+            })
             .set(&DataKey::DeliveryContract, &delivery_contract);
     }
 
@@ -252,12 +290,14 @@ impl IdentityReputationContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
 
-        let mut points: u32 = 5;
-        if weight_grams > 5000 {
-            points += 3;
+        let config = Self::get_reputation_config(env.clone());
+
+        let mut points: u32 = config.base_points;
+        if weight_grams > HEAVY_CARGO_GRAMS {
+            points += config.heavy_cargo_points;
         }
         if fragile {
-            points += 2;
+            points += config.fragile_points;
         }
 
         profile.reputation_score = (profile.reputation_score + points).min(MAX_REPUTATION);

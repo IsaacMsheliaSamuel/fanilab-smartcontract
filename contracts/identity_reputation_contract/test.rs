@@ -217,6 +217,52 @@ fn test_reputation_deduction_sequence() {
     assert_eq!(profile.reputation_score, 55);
 }
 
+// Configurable reputation scoring
+
+#[test]
+fn test_reputation_config_defaults() {
+    let (_env, _, client, _, _) = setup();
+
+    let config = client.get_reputation_config();
+    assert_eq!(config.base_points, 5);
+    assert_eq!(config.heavy_cargo_points, 3);
+    assert_eq!(config.fragile_points, 2);
+}
+
+#[test]
+fn test_admin_configured_points_take_effect() {
+    let (env, admin, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
+    client.set_reputation_config(
+        &admin,
+        &ReputationConfig {
+            base_points: 1,
+            heavy_cargo_points: 6,
+            fragile_points: 4,
+        },
+    );
+
+    client.increase_reputation(&delivery_contract, &driver, &1u64, &6000u32, &true);
+
+    let profile = client.get_driver_profile(&driver);
+    assert_eq!(profile.reputation_score, 61);
+}
+
+#[test]
+fn test_set_reputation_config_unauthorized() {
+    let (env, _, client, _, _) = setup();
+    let attacker = Address::generate(&env);
+
+    let result = client.try_set_reputation_config(
+        &attacker,
+        &ReputationConfig {
+            base_points: 50,
+            heavy_cargo_points: 0,
+            fragile_points: 0,
+        },
+    );
 // Cross-contract wiring updates
 
 #[test]

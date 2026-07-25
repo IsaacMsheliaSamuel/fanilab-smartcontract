@@ -10,6 +10,7 @@ use soroban_sdk::{
     Vec,
 };
 
+const DEFAULT_DISPUTE_REPUTATION_PENALTY: u32 = 10;
 const DISPUTE_REPUTATION_PENALTY: u32 = 10;
 const DISPUTE_REPUTATION_REWARD: u32 = 5;
 const DISPUTE_REPUTATION_SPLIT_PENALTY: u32 = 5;
@@ -46,6 +47,7 @@ pub enum DataKey {
     DisputeTimeLimit,
     DisputeResolutionLimit,
     Dispute(DeliveryId),
+    DisputeReputationPenalty,
 }
 
 #[contract]
@@ -149,6 +151,21 @@ impl DisputeResolutionContract {
             .unwrap_or(0)
     }
 
+    pub fn set_dispute_reputation_penalty(env: Env, caller: Address, penalty: u32) {
+        caller.require_auth();
+        if !Self::is_admin(env.clone(), caller.clone()) {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeReputationPenalty, &penalty);
+    }
+
+    pub fn get_dispute_reputation_penalty(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeReputationPenalty)
+            .unwrap_or(DEFAULT_DISPUTE_REPUTATION_PENALTY)
     pub fn get_dispute_resolution_limit(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -327,6 +344,8 @@ impl DisputeResolutionContract {
             .driver
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
 
+        let penalty = Self::get_dispute_reputation_penalty(env.clone());
+
         if let Some(reputation_addr) = env
             .storage()
             .instance()
@@ -339,7 +358,7 @@ impl DisputeResolutionContract {
                     &env,
                     env.current_contract_address().into_val(&env),
                     driver.clone().into_val(&env),
-                    DISPUTE_REPUTATION_PENALTY.into_val(&env),
+                    penalty.into_val(&env),
                 ],
             );
         }
@@ -359,6 +378,8 @@ impl DisputeResolutionContract {
         );
 
         env.events().publish(
+            (Symbol::new(&env, "dispute_resolved_refund"), delivery_id),
+            (caller, delivery_id, driver, penalty),
             (events::dispute_resolved_refund(&env), delivery_id),
             DisputeResolvedRefundEvent {
                 delivery_id: u64::from(delivery_id),

@@ -647,6 +647,22 @@ fn test_unauthorized_resolve_pay_driver_fails() {
 }
 
 #[test]
+fn test_dispute_reputation_penalty_configurable() {
+    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    // Default matches the previously hardcoded value
+    assert_eq!(dispute_client.get_dispute_reputation_penalty(), 10);
+
+    dispute_client.set_dispute_reputation_penalty(&admin, &25);
+    assert_eq!(dispute_client.get_dispute_reputation_penalty(), 25);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+fn test_unauthorized_set_dispute_reputation_penalty_fails() {
+    let (_env, _admin, sender, _, _, _, _, dispute_client) = setup_test();
+
+    dispute_client.set_dispute_reputation_penalty(&sender, &25);
 #[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
 fn test_unauthorized_resolve_split_funds_fails() {
     let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
