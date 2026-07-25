@@ -89,6 +89,42 @@ impl IdentityReputationContract {
         }
     }
 
+    pub fn set_delivery_contract(env: Env, admin: Address, delivery_contract: Address) {
+        admin.require_auth();
+        let stored_admin = Self::get_admin(env.clone());
+        if admin != stored_admin {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DeliveryContract, &delivery_contract);
+    }
+
+    pub fn set_dispute_contract(env: Env, admin: Address, dispute_contract: Address) {
+        admin.require_auth();
+        let stored_admin = Self::get_admin(env.clone());
+        if admin != stored_admin {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeContract, &dispute_contract);
+    }
+
+    pub fn get_delivery_contract(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::DeliveryContract)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized))
+    }
+
+    pub fn get_dispute_contract(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeContract)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized))
+    }
+
     pub fn is_authorized_contract(env: Env, contract_addr: Address) -> bool {
         let key = DataKey::AuthorizedContract(contract_addr);
         env.storage().persistent().get(&key).unwrap_or(false)
