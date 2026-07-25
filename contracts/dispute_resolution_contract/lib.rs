@@ -32,6 +32,8 @@ pub struct DisputeCase {
     pub raised_at: u64,
     pub raised_by: Address,
     pub evidence_hashes: Vec<BytesN<32>>,
+    pub resolved_at: Option<u64>,
+    pub resolved_by: Option<Address>,
 }
 
 #[contracttype]
@@ -216,6 +218,8 @@ impl DisputeResolutionContract {
             raised_at: env.ledger().timestamp(),
             raised_by: caller.clone(),
             evidence_hashes: Vec::new(&env),
+            resolved_at: None,
+            resolved_by: None,
         };
 
         env.storage().persistent().set(&dispute_key, &dispute);
@@ -292,6 +296,8 @@ impl DisputeResolutionContract {
         }
 
         dispute.status = DisputeStatus::ResolvedRefund;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
         env.storage()
             .persistent()
@@ -370,6 +376,14 @@ impl DisputeResolutionContract {
         if dispute.status != DisputeStatus::Open {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
+
+        dispute.status = DisputeStatus::Split;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolved_by = Some(caller.clone());
+        env.storage().persistent().set(&dispute_key, &dispute);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, 518400, 518400);
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
         let escrow: EscrowRecord = env.invoke_contract(
@@ -451,6 +465,8 @@ impl DisputeResolutionContract {
         }
 
         dispute.status = DisputeStatus::ResolvedPayout;
+        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
         env.storage()
             .persistent()
