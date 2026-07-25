@@ -3,6 +3,7 @@
 Complete API documentation for all FaniLab smart contracts.
 
 ## Table of Contents
+- [Indexing & Enumeration](#indexing--enumeration)
 - [Escrow Contract](#escrow-contract)
 - [Delivery Contract](#delivery-contract)
 - [Dispute Resolution Contract](#dispute-resolution-contract)
@@ -10,6 +11,67 @@ Complete API documentation for all FaniLab smart contracts.
 - [Identity Reputation Contract](#identity-reputation-contract)
 - [Settlement Contract](#settlement-contract)
 - [Shared Types](#shared-types)
+
+---
+
+## Indexing & Enumeration
+
+The protocol supports on-chain secondary indexes to enable efficient queries without requiring off-chain indexers.
+
+### On-Chain Indexes
+
+Secondary indexes are maintained alongside primary records in persistent storage for:
+- **Deliveries by Sender** — all delivery IDs initiated by a given sender
+- **Deliveries by Recipient** — all delivery IDs with a given recipient
+- **Escrows by Sender** — all escrow delivery IDs initiated by a given sender
+- **Escrows by Recipient** — all escrow delivery IDs for a given recipient
+- **Escrows by Driver** — all escrow delivery IDs assigned to a given driver
+- **Fleet Rosters** — all drivers (pending and active) in a fleet
+
+These indexes are automatically maintained by the respective contracts and are bounded to prevent unbounded storage growth (max 10,000 entries per index).
+
+#### Query Functions
+
+**Delivery Contract:**
+- `get_deliveries_by_sender(sender: Address) -> Vec<DeliveryId>` — all deliveries by sender
+- `get_deliveries_by_recipient(recipient: Address) -> Vec<DeliveryId>` — all deliveries to recipient
+
+**Escrow Contract:**
+- `get_escrows_by_sender(sender: Address) -> Vec<u64>` — all escrow delivery IDs by sender
+- `get_escrows_by_recipient(recipient: Address) -> Vec<u64>` — all escrow delivery IDs for recipient
+- `get_escrows_by_driver(driver: Address) -> Vec<u64>` — all escrow delivery IDs for driver
+
+**Fleet Management Contract:**
+- `get_fleet_roster(fleet_id: FleetId) -> Vec<Address>` — all drivers in a fleet
+
+### Interim: Event-Replay Indexing
+
+For off-chain applications requiring advanced queries (e.g., deliveries in a specific date range, by cargo category, or paginated results), the recommended interim approach is **event-replay indexing**:
+
+1. **Collect Events** — Replay all contract events from genesis ledger or a known snapshot
+2. **Build Local Index** — Maintain a searchable database (e.g., PostgreSQL, Elasticsearch) of parsed events
+3. **Subscribe to New Events** — Listen for new events via Soroban RPC and keep the local index current
+4. **Query Locally** — Answer complex queries against the local index
+
+**Key Event Types for Indexing:**
+- `delivery_created(delivery_id, sender)` — track creation timestamps, sender, cargo details
+- `escrow_funded(delivery_id)` — track escrow amounts, tokens
+- `driver_assigned(delivery_id, driver)` — track driver assignments
+- `delivery_confirmed(delivery_id, recipient)` — track completion
+- `delivery_disputed(delivery_id, reporter)` — track disputes
+- `invite_accepted(fleet_id, driver)` — track fleet membership changes
+- `driver_removed(fleet_id, driver)` — track driver removal
+
+**Advantages:**
+- Full historical data and audit trail
+- Advanced queries without modifying contracts
+- Efficient pagination and filtering
+- Off-chain resilience (local index persists independently)
+
+**Disadvantages:**
+- Requires external infrastructure
+- Potential sync lag between on-chain and off-chain state
+- Higher operational complexity
 
 ---
 
@@ -229,6 +291,49 @@ Retrieve full escrow record.
 **Errors:**
 - `DeliveryNotFound` - No escrow for this delivery
 
+#### `create_escrows_batch`
+Create multiple escrows in a single transaction (up to 100 per batch).
+
+**Parameters:**
+- `sender: Address` - Sender funding all escrows
+- `recipient: Address` - Delivery recipient (shared for all)
+- `token: Address` - Token for all escrows
+- `escrow_list: Vec<(u64, Address, i128)>` — tuples of (delivery_id, driver, amount)
+
+**Authorization:** Sender
+
+**Returns:** `u32` — count of escrows created
+
+**Errors:**
+- `DuplicateDelivery` - Escrow already exists for any delivery_id
+- `InvalidState` - Batch size exceeds 100
+
+**Events:** `escrow_funded` (once per escrow)
+
+#### `get_escrows_by_sender`
+Get all escrow delivery IDs initiated by a sender.
+
+**Parameters:**
+- `sender: Address` - Sender address
+
+**Returns:** `Vec<u64>` — list of delivery IDs
+
+#### `get_escrows_by_recipient`
+Get all escrow delivery IDs for a recipient.
+
+**Parameters:**
+- `recipient: Address` - Recipient address
+
+**Returns:** `Vec<u64>` — list of delivery IDs
+
+#### `get_escrows_by_driver`
+Get all escrow delivery IDs assigned to a driver.
+
+**Parameters:**
+- `driver: Address` - Driver address
+
+**Returns:** `Vec<u64>` — list of delivery IDs
+
 ---
 
 ## Delivery Contract
@@ -380,6 +485,44 @@ Retrieve full delivery record.
 
 **Errors:**
 - `DeliveryNotFound` - Invalid delivery_id
+
+#### `create_deliveries_batch`
+Create multiple deliveries in a single transaction (up to 100 per batch).
+
+**Parameters:**
+- `sender: Address` - Sender creating all deliveries
+- `recipient: Address` - Recipient for all deliveries (shared)
+- `metadata_list: Vec<DeliveryMetadata>` — delivery metadata for each delivery
+
+**Authorization:** Sender
+
+**Returns:** `Vec<DeliveryId>` — list of created delivery IDs
+
+**Errors:**
+- `BatchTooLarge` - Metadata list exceeds 100 items
+
+**Events:** `delivery_created` (once per delivery)
+
+**State Changes:**
+- Increments delivery counter for each delivery
+- Stores delivery records with Pending status
+- Updates secondary indexes for sender and recipient
+
+#### `get_deliveries_by_sender`
+Get all delivery IDs initiated by a sender.
+
+**Parameters:**
+- `sender: Address` - Sender address
+
+**Returns:** `Vec<DeliveryId>` — list of delivery IDs
+
+#### `get_deliveries_by_recipient`
+Get all delivery IDs with a specific recipient.
+
+**Parameters:**
+- `recipient: Address` - Recipient address
+
+**Returns:** `Vec<DeliveryId>` — list of delivery IDs
 
 #### `get_driver_profile`
 Get driver statistics and reputation.
@@ -674,6 +817,9 @@ pub enum FleetError {
     DriverAlreadyActive  = 7,
 }
 ```
+## Fleet Management Contract
+
+Manages driver fleet organization and membership.
 
 ### Initialization
 
@@ -730,6 +876,30 @@ Register a new fleet, returning its assigned fleet ID.
 
 #### `get_fleet`
 Return the stored profile for a fleet.
+Initialize fleet management contract.
+
+**Parameters:**
+- `admin: Address` - Admin account
+
+**Authorization:** Contract deployer
+
+### Fleet Operations
+
+#### `register_fleet`
+Register a new fleet.
+
+**Parameters:**
+- `owner: Address` - Fleet owner (caller)
+- `treasury: Address` - Fleet treasury wallet
+
+**Authorization:** Owner
+
+**Returns:** `FleetId` — new fleet identifier
+
+**Events:** `fleet_registered`
+
+#### `get_fleet`
+Retrieve fleet profile.
 
 **Parameters:**
 - `fleet_id: FleetId` - Fleet identifier
@@ -746,6 +916,15 @@ Update the treasury wallet for an existing fleet.
 - `owner: Address` - Fleet owner (must sign)
 - `fleet_id: FleetId` - Fleet identifier
 - `treasury: Address` - New treasury wallet address
+- `FleetNotFound` - Invalid fleet_id
+
+#### `update_fleet_treasury`
+Update treasury wallet for a fleet.
+
+**Parameters:**
+- `owner: Address` - Fleet owner (caller)
+- `fleet_id: FleetId` - Fleet identifier
+- `treasury: Address` - New treasury address
 
 **Authorization:** Fleet owner
 
@@ -764,6 +943,18 @@ Invite a driver to join a fleet (creates a `Pending` invite).
 - `caller: Address` - Fleet owner (must sign)
 - `fleet_id: FleetId` - Fleet identifier
 - `driver: Address` - Driver to invite
+- `FleetNotFound` - Invalid fleet_id
+- `Unauthorized` - Caller not fleet owner
+
+**Events:** `fleet_treasury_updated`
+
+#### `add_driver_to_fleet`
+Invite a driver to a fleet (owner only).
+
+**Parameters:**
+- `caller: Address` - Fleet owner
+- `fleet_id: FleetId` - Fleet identifier
+- `driver: Address` - Driver address
 
 **Authorization:** Fleet owner
 
@@ -791,6 +982,26 @@ Accept a pending fleet invite. Transitions driver status from `Pending` → `Act
 - `FleetNotFound` - No fleet with that ID exists
 - `InviteNotFound` - No pending invite for this driver
 - `DriverAlreadyActive` - Driver is already an active member
+- `FleetNotFound` - Invalid fleet_id
+- `Unauthorized` - Caller not fleet owner
+- `DriverAlreadyInvited` - Driver already invited
+- `DriverAlreadyActive` - Driver already active
+
+**Events:** `driver_invited`
+
+#### `accept_fleet_invite`
+Accept pending fleet invite (driver-initiated).
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+- `driver: Address` - Driver address (caller)
+
+**Authorization:** Driver
+
+**Errors:**
+- `FleetNotFound` - Invalid fleet_id
+- `InviteNotFound` - No pending invite
+- `DriverAlreadyActive` - Driver already active
 
 **Events:** `invite_accepted`
 
@@ -812,6 +1023,24 @@ Remove a driver from a fleet (bilateral — fleet owner or the driver may call).
 - `FleetNotFound` - No fleet with that ID exists
 - `Unauthorized` - Caller is neither fleet owner nor the driver
 - `InviteNotFound` - No fleet record found for this driver
+- Transitions driver status from Pending → Active
+- Increments fleet's total_active_drivers
+- Adds driver to fleet roster
+
+#### `remove_driver_from_fleet`
+Remove driver from fleet (owner or driver can initiate).
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+- `caller: Address` - Fleet owner or driver
+- `driver: Address` - Driver to remove
+
+**Authorization:** Fleet owner or driver
+
+**Errors:**
+- `FleetNotFound` - Invalid fleet_id
+- `InviteNotFound` - Driver not in fleet
+- `Unauthorized` - Caller not owner or driver
 
 **Events:** `driver_removed`
 
@@ -834,6 +1063,12 @@ Return the fleet membership status of a driver, or `None` if no record exists.
 Return the address the escrow contract should route funds to for a given driver and fleet.
 
 Returns the fleet's treasury if the driver is an active member; otherwise returns the driver's own address.
+- Deletes driver's fleet record
+- Decrements fleet's total_active_drivers (if active)
+- Removes driver from fleet roster
+
+#### `get_payout_address`
+Determine where payout funds should go for a driver in a fleet.
 
 **Parameters:**
 - `driver: Address` - Driver address
@@ -1138,6 +1373,26 @@ Intended to integrate with the Stellar DEX or a liquidity pool to convert
 **Authorization:** Caller (must sign)
 
 > **Note:** Phase 3 stub — no swap is performed.
+**Returns:** `Address` — fleet treasury if active, else driver's own address
+
+#### `get_driver_fleet_status`
+Get driver's status in a fleet.
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+- `driver: Address` - Driver address
+
+**Returns:** `Option<DriverFleetStatus>` — Pending, Active, or None
+
+### Enumeration
+
+#### `get_fleet_roster`
+Get all drivers in a fleet (both pending and active).
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+
+**Returns:** `Vec<Address>` — list of driver addresses
 
 ---
 
