@@ -534,6 +534,289 @@ Get driver statistics and reputation.
 
 ---
 
+## Dispute Resolution Contract
+
+Handles the full lifecycle of delivery disputes — evidence submission, resolution
+verdicts, and cross-contract calls to freeze/release escrow funds and penalise
+driver reputation.
+
+### Types
+
+#### `DisputeStatus`
+```rust
+pub enum DisputeStatus {
+    Open,             // Dispute raised, awaiting admin verdict
+    ResolvedRefund,   // Admin resolved: funds returned to sender
+    ResolvedPayout,   // Admin resolved: funds released to driver
+    Split,            // Admin resolved: funds split between parties
+}
+```
+
+#### `DisputeCase`
+```rust
+pub struct DisputeCase {
+    pub delivery_id:     DeliveryId,
+    pub status:          DisputeStatus,
+    pub raised_at:       u64,
+    pub raised_by:       Address,
+    pub evidence_hashes: Vec<BytesN<32>>,
+}
+```
+
+### Initialization
+
+#### `init`
+Initialize the dispute resolution contract.
+
+**Parameters:**
+- `admin: Address` - Initial admin address
+- `delivery_contract: Address` - Address of the delivery contract
+- `escrow_contract: Address` - Address of the escrow contract
+- `dispute_time_limit: u64` - Seconds after delivery within which a dispute may be raised
+
+**Authorization:** Contract deployer
+
+**Errors:**
+- `AlreadyInitialized` - Contract has already been initialized
+
+### Admin Operations
+
+#### `add_admin`
+Grant admin privileges to a new address.
+
+**Parameters:**
+- `caller: Address` - Current admin
+- `new_admin: Address` - Address to promote
+
+**Authorization:** Existing admin
+
+**Errors:**
+- `Unauthorized` - Caller is not an admin
+
+#### `remove_admin`
+Revoke admin privileges from an address.
+
+**Parameters:**
+- `caller: Address` - Current admin performing the removal
+- `old_admin: Address` - Address to demote
+
+**Authorization:** Existing admin
+
+**Errors:**
+- `Unauthorized` - Caller is not an admin
+
+#### `set_identity_reputation_contract`
+Configure the identity/reputation contract address used for reputation penalties.
+
+**Parameters:**
+- `caller: Address` - Admin address
+- `reputation_contract: Address` - Address of the identity reputation contract
+
+**Authorization:** Admin only
+
+**Errors:**
+- `Unauthorized` - Caller is not an admin
+
+### Query Functions
+
+#### `is_admin`
+Check whether an address holds admin privileges.
+
+**Parameters:**
+- `admin: Address` - Address to query
+
+**Returns:** `bool`
+
+#### `get_delivery_contract`
+Return the configured delivery contract address.
+
+**Returns:** `Address`
+
+**Errors:**
+- `NotInitialized` - Contract has not been initialized
+
+#### `get_escrow_contract`
+Return the configured escrow contract address.
+
+**Returns:** `Address`
+
+**Errors:**
+- `NotInitialized` - Contract has not been initialized
+
+#### `get_identity_reputation_contract`
+Return the configured identity/reputation contract address.
+
+**Returns:** `Address`
+
+**Errors:**
+- `NotInitialized` - Identity contract address not set
+
+#### `get_dispute_time_limit`
+Return the dispute time limit in seconds.
+
+**Returns:** `u64`
+
+#### `get_dispute`
+Retrieve a full dispute record by delivery ID.
+
+**Parameters:**
+- `delivery_id: DeliveryId` - Delivery identifier
+
+**Returns:** `DisputeCase`
+
+**Errors:**
+- `DeliveryNotFound` - No dispute exists for this delivery
+
+### Dispute Lifecycle
+
+#### `raise_dispute`
+Open a dispute for an active, in-transit, or recently delivered delivery.
+
+**Parameters:**
+- `caller: Address` - Sender or recipient of the delivery
+- `delivery_id: DeliveryId` - Delivery identifier
+
+**Authorization:** Delivery sender or recipient
+
+**Errors:**
+- `Unauthorized` - Caller is neither sender nor recipient
+- `InvalidState` - Delivery is in a non-disputable state, or the post-delivery dispute window has closed
+- `DuplicateDelivery` - A dispute already exists for this delivery
+
+**Events:** `dispute_raised`
+
+**State Changes:**
+- Creates a `DisputeCase` record with `DisputeStatus::Open`
+- Calls `delivery_contract.raise_dispute` to transition delivery to `Disputed`
+- Calls `escrow_contract.freeze_funds` to pause the escrow
+
+#### `add_evidence_hash`
+Attach a SHA-256 evidence hash to an open dispute.
+
+**Parameters:**
+- `caller: Address` - Sender or recipient submitting evidence
+- `delivery_id: DeliveryId` - Delivery identifier
+- `evidence_hash: BytesN<32>` - SHA-256 hash of the evidence document/image
+
+**Authorization:** Delivery sender or recipient
+
+**Errors:**
+- `DeliveryNotFound` - No dispute exists for this delivery
+- `InvalidState` - Dispute is not in `Open` status
+- `Unauthorized` - Caller is neither sender nor recipient
+
+**Events:** `evidence_added`
+
+**State Changes:**
+- Appends `evidence_hash` to `DisputeCase.evidence_hashes`
+
+#### `resolve_dispute_refund_sender`
+Admin verdict: full refund to sender. Applies a reputation penalty to the driver.
+
+**Parameters:**
+- `caller: Address` - Admin address
+- `delivery_id: DeliveryId` - Delivery identifier
+
+**Authorization:** Admin only
+
+**Errors:**
+- `Unauthorized` - Caller is not an admin
+- `DeliveryNotFound` - No dispute exists for this delivery
+- `InvalidState` - Dispute is not in `Open` status
+- `ProviderNotFound` - No driver assigned to the delivery
+
+**Events:** `dispute_resolved_refund`
+
+**State Changes:**
+- Sets `DisputeCase.status` to `ResolvedRefund`
+- Calls `identity_reputation_contract.decrease_reputation` (−10 points, if configured)
+- Calls `escrow_contract.resolve_dispute` with `release_to_driver = false`
+
+#### `resolve_dispute_pay_driver`
+Admin verdict: full payout to driver.
+
+**Parameters:**
+- `caller: Address` - Admin address
+- `delivery_id: DeliveryId` - Delivery identifier
+
+**Authorization:** Admin only
+
+**Errors:**
+- `Unauthorized` - Caller is not an admin
+- `DeliveryNotFound` - No dispute exists for this delivery
+- `InvalidState` - Dispute is not in `Open` status
+
+**Events:** `dispute_resolved_payout`
+
+**State Changes:**
+- Sets `DisputeCase.status` to `ResolvedPayout`
+- Calls `escrow_contract.resolve_dispute` with `release_to_driver = true`
+
+#### `resolve_dispute_split_funds`
+Admin verdict: split escrow funds between sender and driver.
+
+**Parameters:**
+- `caller: Address` - Admin address
+- `delivery_id: DeliveryId` - Delivery identifier
+- `sender_share_bps: u32` - Sender's share of the escrow in basis points (0–10 000)
+
+**Authorization:** Admin only
+
+**Errors:**
+- `Unauthorized` - Caller is not an admin
+- `DeliveryNotFound` - No dispute exists for this delivery
+- `InvalidState` - Dispute is not in `Open` status
+
+**Events:** `dispute_resolved_split`
+
+**State Changes:**
+- Sets `DisputeCase.status` to `Split`
+- Calls `escrow_contract.resolve_dispute_split` with the specified basis-point split
+
+---
+
+## Fleet Management Contract
+
+Manages fleets of drivers — fleet registration, treasury configuration, driver
+invitations, and payout routing.
+
+### Types
+
+#### `FleetId`
+```rust
+pub type FleetId = u64;
+```
+
+#### `DriverFleetStatus`
+```rust
+pub enum DriverFleetStatus {
+    Pending,  // Driver invited but has not yet accepted
+    Active,   // Driver accepted and is an active fleet member
+}
+```
+
+#### `FleetProfile`
+```rust
+pub struct FleetProfile {
+    pub fleet_id:             FleetId,
+    pub owner:                Address,
+    pub treasury:             Address,
+    pub total_active_drivers: u32,
+}
+```
+
+#### `FleetError`
+```rust
+pub enum FleetError {
+    AlreadyInitialized   = 1,
+    NotInitialized       = 2,
+    Unauthorized         = 3,
+    FleetNotFound        = 4,
+    DriverAlreadyInvited = 5,
+    InviteNotFound       = 6,
+    DriverAlreadyActive  = 7,
+}
+```
 ## Fleet Management Contract
 
 Manages driver fleet organization and membership.
@@ -541,6 +824,58 @@ Manages driver fleet organization and membership.
 ### Initialization
 
 #### `init`
+Initialize the fleet management contract.
+
+**Parameters:**
+- `admin: Address` - Contract administrator
+
+**Authorization:** Contract deployer
+
+**Errors:**
+- `AlreadyInitialized` - Contract has already been initialized
+
+**State Changes:**
+- Sets admin address
+- Resets fleet counter to `0`
+
+#### `set_identity_contract`
+Configure the identity/reputation contract for automatic driver profile creation on fleet registration.
+
+**Parameters:**
+- `admin: Address` - Admin address
+- `identity_contract: Address` - Address of the identity reputation contract
+
+**Authorization:** Admin only
+
+**Errors:**
+- `NotInitialized` - Contract has not been initialized
+- `Unauthorized` - Caller is not the stored admin
+
+### Fleet Operations
+
+#### `register_fleet`
+Register a new fleet, returning its assigned fleet ID.
+
+**Parameters:**
+- `owner: Address` - Fleet owner (must sign the transaction)
+- `treasury: Address` - Wallet that receives driver payouts for this fleet
+
+**Authorization:** Owner (must sign)
+
+**Returns:** `FleetId`
+
+**Errors:**
+- `NotInitialized` - Fleet counter not found (contract not initialized)
+
+**Events:** `fleet_registered`
+
+**State Changes:**
+- Increments and persists the fleet counter
+- Creates and stores a `FleetProfile`
+- Calls `identity_reputation_contract.register_driver` for the owner (if identity contract configured)
+
+#### `get_fleet`
+Return the stored profile for a fleet.
 Initialize fleet management contract.
 
 **Parameters:**
@@ -572,6 +907,15 @@ Retrieve fleet profile.
 **Returns:** `FleetProfile`
 
 **Errors:**
+- `FleetNotFound` - No fleet with that ID exists
+
+#### `update_fleet_treasury`
+Update the treasury wallet for an existing fleet.
+
+**Parameters:**
+- `owner: Address` - Fleet owner (must sign)
+- `fleet_id: FleetId` - Fleet identifier
+- `treasury: Address` - New treasury wallet address
 - `FleetNotFound` - Invalid fleet_id
 
 #### `update_fleet_treasury`
@@ -585,6 +929,20 @@ Update treasury wallet for a fleet.
 **Authorization:** Fleet owner
 
 **Errors:**
+- `FleetNotFound` - No fleet with that ID exists
+- `Unauthorized` - Caller is not the fleet owner
+
+**Events:** `fleet_treasury_updated`
+
+### Driver Management
+
+#### `add_driver_to_fleet`
+Invite a driver to join a fleet (creates a `Pending` invite).
+
+**Parameters:**
+- `caller: Address` - Fleet owner (must sign)
+- `fleet_id: FleetId` - Fleet identifier
+- `driver: Address` - Driver to invite
 - `FleetNotFound` - Invalid fleet_id
 - `Unauthorized` - Caller not fleet owner
 
@@ -601,6 +959,29 @@ Invite a driver to a fleet (owner only).
 **Authorization:** Fleet owner
 
 **Errors:**
+- `FleetNotFound` - No fleet with that ID exists
+- `Unauthorized` - Caller is not the fleet owner
+- `DriverAlreadyInvited` - A pending invite already exists for this driver
+- `DriverAlreadyActive` - Driver is already an active member
+
+**Events:** `driver_invited`
+
+**State Changes:**
+- Stores `DriverFleetStatus::Pending` for `(fleet_id, driver)`
+
+#### `accept_fleet_invite`
+Accept a pending fleet invite. Transitions driver status from `Pending` → `Active`.
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+- `driver: Address` - Driver accepting the invite (must sign)
+
+**Authorization:** Driver (must sign)
+
+**Errors:**
+- `FleetNotFound` - No fleet with that ID exists
+- `InviteNotFound` - No pending invite for this driver
+- `DriverAlreadyActive` - Driver is already an active member
 - `FleetNotFound` - Invalid fleet_id
 - `Unauthorized` - Caller not fleet owner
 - `DriverAlreadyInvited` - Driver already invited
@@ -625,6 +1006,23 @@ Accept pending fleet invite (driver-initiated).
 **Events:** `invite_accepted`
 
 **State Changes:**
+- Sets `DriverFleetStatus::Active` for `(fleet_id, driver)`
+- Increments `FleetProfile.total_active_drivers`
+
+#### `remove_driver_from_fleet`
+Remove a driver from a fleet (bilateral — fleet owner or the driver may call).
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+- `caller: Address` - Fleet owner or the driver being removed (must sign)
+- `driver: Address` - Driver to remove
+
+**Authorization:** Fleet owner or the driver themselves
+
+**Errors:**
+- `FleetNotFound` - No fleet with that ID exists
+- `Unauthorized` - Caller is neither fleet owner nor the driver
+- `InviteNotFound` - No fleet record found for this driver
 - Transitions driver status from Pending → Active
 - Increments fleet's total_active_drivers
 - Adds driver to fleet roster
@@ -647,6 +1045,24 @@ Remove driver from fleet (owner or driver can initiate).
 **Events:** `driver_removed`
 
 **State Changes:**
+- Deletes `DriverFleet(fleet_id, driver)` record
+- If driver was `Active`, decrements `FleetProfile.total_active_drivers`
+
+#### `get_driver_fleet_status`
+Return the fleet membership status of a driver, or `None` if no record exists.
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+- `driver: Address` - Driver address
+
+**Returns:** `Option<DriverFleetStatus>`
+
+### Payout Routing
+
+#### `get_payout_address`
+Return the address the escrow contract should route funds to for a given driver and fleet.
+
+Returns the fleet's treasury if the driver is an active member; otherwise returns the driver's own address.
 - Deletes driver's fleet record
 - Decrements fleet's total_active_drivers (if active)
 - Removes driver from fleet roster
@@ -658,6 +1074,305 @@ Determine where payout funds should go for a driver in a fleet.
 - `driver: Address` - Driver address
 - `fleet_id: FleetId` - Fleet identifier
 
+**Returns:** `Address` (fleet treasury if active member, driver address otherwise)
+
+---
+
+## Identity Reputation Contract
+
+Manages on-chain driver and user profiles, KYC status, and reputation scoring.
+
+### Types
+
+#### `UserProfile`
+```rust
+pub struct UserProfile {
+    pub address:   Address,
+    pub join_date: u64,
+}
+```
+
+#### `DriverProfile`
+```rust
+pub struct DriverProfile {
+    pub address:               Address,
+    pub deliveries_completed:  u32,
+    pub reputation_score:      u32,   // 0–100
+    pub registered_at:         u64,
+    pub kyc_verified:          bool,
+}
+```
+
+#### `DriverTier`
+```rust
+pub enum DriverTier {
+    Bronze,  // score < 50
+    Silver,  // 50 ≤ score < 75
+    Gold,    // score ≥ 75
+}
+```
+
+### Initialization
+
+#### `init`
+Initialize the contract with only an admin address.
+
+**Parameters:**
+- `admin: Address` - Contract administrator
+
+**Authorization:** Contract deployer
+
+**Errors:**
+- `AlreadyInitialized` - Contract has already been initialized
+
+#### `initialize`
+Initialize the contract with an admin and peer contract addresses (delivery & dispute).
+
+**Parameters:**
+- `admin: Address` - Contract administrator (must sign)
+- `delivery_contract: Address` - Address of the delivery contract
+- `dispute_contract: Address` - Address of the dispute resolution contract
+
+**Authorization:** Admin (must sign)
+
+**Errors:**
+- `AlreadyInitialized` - Contract has already been initialized
+
+### Admin Operations
+
+#### `get_admin`
+Return the current admin address.
+
+**Returns:** `Address`
+
+**Errors:**
+- `NotInitialized` - Contract has not been initialized
+
+#### `set_authorized_contract`
+Grant or revoke cross-contract call authorization.
+
+**Parameters:**
+- `admin: Address` - Admin address (must sign)
+- `contract_addr: Address` - Contract to authorize or deauthorize
+- `authorized: bool` - `true` to grant, `false` to revoke
+
+**Authorization:** Admin only
+
+**Errors:**
+- `Unauthorized` - Caller is not the stored admin
+
+#### `is_authorized_contract`
+Check whether a contract address is authorized to make cross-contract calls.
+
+**Parameters:**
+- `contract_addr: Address` - Contract address to check
+
+**Returns:** `bool`
+
+#### `update_driver_kyc_status`
+Update a driver's KYC verification status.
+
+**Parameters:**
+- `admin: Address` - Admin address (must sign)
+- `driver: Address` - Driver whose KYC status is being updated
+- `kyc_verified: bool` - New KYC verification status
+
+**Authorization:** Admin only
+
+**Errors:**
+- `NotInitialized` - Contract has not been initialized
+- `Unauthorized` - Caller is not the stored admin
+- `ProviderNotFound` - Driver profile does not exist
+
+**Events:** `kyc_status_updated`
+
+### Profile Management
+
+#### `register_driver`
+Register a new driver profile with a starting reputation score of 50.
+
+**Parameters:**
+- `driver: Address` - Driver address (must sign)
+
+**Authorization:** Driver (must sign)
+
+**Errors:**
+- `AlreadyInitialized` - A profile already exists for this address
+
+**Events:** `driver_registered`
+
+**State Changes:**
+- Creates `DriverProfile` with `reputation_score = 50`, `deliveries_completed = 0`, `kyc_verified = false`
+
+#### `register_user`
+Register a new user (sender/recipient) profile.
+
+**Parameters:**
+- `user: Address` - User address (must sign)
+
+**Authorization:** User (must sign)
+
+**Returns:** `UserProfile`
+
+**Errors:**
+- `AlreadyInitialized` - A profile already exists for this address
+
+**Events:** `user_registered`
+
+#### `get_driver_profile`
+Retrieve a driver's profile.
+
+**Parameters:**
+- `driver: Address` - Driver address
+
+**Returns:** `DriverProfile`
+
+**Errors:**
+- `ProviderNotFound` - Driver profile does not exist
+
+#### `get_user_profile`
+Retrieve a user's profile.
+
+**Parameters:**
+- `user: Address` - User address
+
+**Returns:** `UserProfile`
+
+**Errors:**
+- `ProviderNotFound` - User profile does not exist
+
+### Reputation Management
+
+#### `increase_reputation`
+Increase a driver's reputation score after a successful delivery.
+
+**Parameters:**
+- `caller: Address` - Must be the delivery contract or dispute contract
+- `driver: Address` - Driver whose score is being updated
+- `delivery_id: u64` - Delivery identifier (for event emission)
+- `weight_grams: u32` - Cargo weight in grams (>5 000 g adds bonus points)
+- `fragile: bool` - Whether the cargo was fragile (adds bonus points)
+
+**Authorization:** Delivery contract or dispute contract only
+
+**Errors:**
+- `NotInitialized` - Contract addresses not configured
+- `Unauthorized` - Caller is not an authorized contract
+- `ProviderNotFound` - Driver profile does not exist
+
+**Events:** `reputation_increased`
+
+**State Changes:**
+- Adds base 5 points + 3 for heavy cargo (>5 000 g) + 2 for fragile cargo
+- Caps `reputation_score` at 100
+- Increments `deliveries_completed`
+
+#### `decrease_reputation`
+Decrease a driver's reputation score following a dispute resolved in the sender's favour.
+
+**Parameters:**
+- `caller: Address` - Must be the delivery contract or dispute contract
+- `driver: Address` - Driver whose score is being penalised
+- `points: u32` - Number of reputation points to deduct
+
+**Authorization:** Delivery contract or dispute contract only
+
+**Errors:**
+- `NotInitialized` - Contract addresses not configured
+- `Unauthorized` - Caller is not an authorized contract
+- `ProviderNotFound` - Driver profile does not exist
+
+**Events:** `reputation_decreased`
+
+**State Changes:**
+- Decreases `reputation_score` by `points`, flooring at 0 (saturating subtraction)
+
+### Tier & Eligibility
+
+#### `get_driver_tier`
+Return the driver's current tier based on their reputation score.
+
+| Score range | Tier   |
+|-------------|--------|
+| 0 – 49      | Bronze |
+| 50 – 74     | Silver |
+| 75 – 100    | Gold   |
+
+**Parameters:**
+- `driver: Address` - Driver address
+
+**Returns:** `DriverTier`
+
+**Errors:**
+- `ProviderNotFound` - Driver profile does not exist
+
+#### `is_eligible_for_enterprise`
+Check whether a driver's reputation score meets the enterprise threshold (≥ 75).
+
+**Parameters:**
+- `driver: Address` - Driver address
+
+**Returns:** `bool`
+
+**Errors:**
+- `ProviderNotFound` - Driver profile does not exist
+
+---
+
+## Settlement Contract
+
+> **Phase 3 — Stub implementation.** The Settlement contract is deployed but its
+> functions are not yet implemented. Function signatures and intended behaviour
+> are documented here for integrator reference; the bodies will be filled in
+> during Phase 3 development.
+
+Handles cross-border currency swaps during escrow release, allowing drivers to
+receive payment in their preferred asset via the Stellar DEX or liquidity pools.
+
+### Initialization
+
+#### `init`
+Initialize the settlement contract.
+
+**Parameters:**
+- `admin: Address` - Contract administrator (must sign)
+
+**Authorization:** Admin (must sign)
+
+> **Note:** Phase 3 stub — no state is persisted yet.
+
+### Query Functions
+
+#### `get_driver_preference`
+Return the driver's preferred asset for payment, if one has been set.
+
+**Parameters:**
+- `_driver: Address` - Driver address
+
+**Returns:** `Option<Address>`
+
+> **Note:** Phase 3 stub — always returns `None`.
+
+### Settlement Operations
+
+#### `execute_settlement_swap`
+Execute an asset swap and transfer the output to a recipient.
+
+Intended to integrate with the Stellar DEX or a liquidity pool to convert
+`from_token` to `to_token` before crediting `recipient` with at least
+`min_amount_out`.
+
+**Parameters:**
+- `caller: Address` - Authorized caller (must sign)
+- `_from_token: Address` - Source token contract address
+- `_to_token: Address` - Target token contract address
+- `_recipient: Address` - Address receiving the swapped funds
+- `_amount: i128` - Amount of `from_token` to swap
+- `_min_amount_out: i128` - Minimum acceptable output (slippage guard)
+
+**Authorization:** Caller (must sign)
+
+> **Note:** Phase 3 stub — no swap is performed.
 **Returns:** `Address` — fleet treasury if active, else driver's own address
 
 #### `get_driver_fleet_status`
@@ -874,4 +1589,4 @@ client.release_escrow(&recipient, &delivery_id);
 
 **API Version**: 1.0.0  
 **Last Updated**: January 2026  
-**Soroban SDK**: 22.0.1
+**Soroban SDK**: 27.0.0
