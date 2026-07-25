@@ -44,6 +44,7 @@ pub enum DataKey {
     EscrowContract,
     IdentityReputationContract,
     DisputeTimeLimit,
+    DisputeResolutionLimit,
     Dispute(DeliveryId),
 }
 
@@ -58,6 +59,7 @@ impl DisputeResolutionContract {
         delivery_contract: Address,
         escrow_contract: Address,
         dispute_time_limit: u64,
+        dispute_resolution_limit: u64,
     ) {
         if env.storage().instance().has(&DataKey::DeliveryContract) {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
@@ -74,6 +76,9 @@ impl DisputeResolutionContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeTimeLimit, &dispute_time_limit);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeResolutionLimit, &dispute_resolution_limit);
         env.storage().instance().set(&DataKey::Admin(admin), &true);
     }
 
@@ -144,6 +149,14 @@ impl DisputeResolutionContract {
             .unwrap_or(0)
     }
 
+    pub fn get_dispute_resolution_limit(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeResolutionLimit)
+            .unwrap_or(0)
+    }
+
+    pub fn set_dispute_resolution_limit(env: Env, caller: Address, new_limit: u64) {
     pub fn update_dispute_time_limit(env: Env, caller: Address, new_limit: u64) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -151,6 +164,7 @@ impl DisputeResolutionContract {
         }
         env.storage()
             .instance()
+            .set(&DataKey::DisputeResolutionLimit, &new_limit);
             .set(&DataKey::DisputeTimeLimit, &new_limit);
         env.events().publish(
             (Symbol::new(&env, "dispute_time_limit_updated"),),
@@ -518,6 +532,80 @@ impl DisputeResolutionContract {
                 delivery_id: u64::from(delivery_id),
                 caller,
             },
+        );
+    }
+
+    /// Force-resolve a dispute that has been Open past the configured resolution window.
+    /// Any party (sender, recipient, or driver) may call this once the window has elapsed.
+    /// Applies a 50/50 default split as the automatic fallback outcome.
+    pub fn force_resolve_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
+        caller.require_auth();
+
+        let dispute_key = DataKey::Dispute(delivery_id);
+        let mut dispute: DisputeCase = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
+
+        if dispute.status != DisputeStatus::Open {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
+        // Verify caller is a party to the delivery
+        let delivery_contract_addr = Self::get_delivery_contract(env.clone());
+        let delivery: shared_types::DeliveryRecord = env.invoke_contract(
+            &delivery_contract_addr,
+            &Symbol::new(&env, "get_delivery"),
+            soroban_sdk::vec![&env, delivery_id.into_val(&env)],
+        );
+        if caller != delivery.sender
+            && caller != delivery.recipient
+            && Some(caller.clone()) != delivery.driver
+        {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+
+        // Verify the resolution window has elapsed
+        let resolution_limit = Self::get_dispute_resolution_limit(env.clone());
+        let current_time = env.ledger().timestamp();
+        if current_time <= dispute.raised_at + resolution_limit {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
+        // Apply default 50/50 split
+        const DEFAULT_SENDER_SHARE_BPS: u32 = 5000;
+        dispute.status = DisputeStatus::Split;
+        dispute.resolved_at = Some(current_time);
+        dispute.resolved_by = Some(caller.clone());
+        env.storage().persistent().set(&dispute_key, &dispute);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, 518400, 518400);
+
+        let escrow_addr = Self::get_escrow_contract(env.clone());
+        let escrow: EscrowRecord = env.invoke_contract(
+            &escrow_addr,
+            &Symbol::new(&env, "get_escrow"),
+            soroban_sdk::vec![&env, u64::from(delivery_id).into_val(&env)],
+        );
+
+        if escrow.status == EscrowStatus::Paused {
+            let _: () = env.invoke_contract(
+                &escrow_addr,
+                &Symbol::new(&env, "resolve_dispute_split"),
+                soroban_sdk::vec![
+                    &env,
+                    caller.into_val(&env),
+                    u64::from(delivery_id).into_val(&env),
+                    DEFAULT_SENDER_SHARE_BPS.into_val(&env),
+                ],
+            );
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_force_resolved"), delivery_id),
+            (delivery_id, DEFAULT_SENDER_SHARE_BPS),
         );
     }
 
