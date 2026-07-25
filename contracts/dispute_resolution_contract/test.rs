@@ -646,6 +646,12 @@ fn test_unauthorized_resolve_pay_driver_fails() {
     dispute_client.resolve_dispute_pay_driver(&sender, &did(9));
 }
 
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+fn test_unauthorized_resolve_split_funds_fails() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
 // ── DISPUTE TIME LIMIT VALIDATION (Issue #21) ────────────────────────────────
 
 #[test]
@@ -724,6 +730,7 @@ fn test_split_resolve_with_non_paused_escrow_fails() {
         did(10),
         sender.clone(),
         recipient.clone(),
+        DeliveryStatus::Active,
         DeliveryStatus::Disputed,
         None,
     );
@@ -758,6 +765,15 @@ fn test_post_delivery_dispute_can_be_raised_and_resolved() {
         sender.clone(),
         recipient.clone(),
         driver.clone(),
+        token,
+        shared_types::EscrowStatus::Paused,
+    );
+    set_mock_escrow(&env, &escrow_id, 10, &escrow_record);
+
+    dispute_client.raise_dispute(&sender, &did(10));
+
+    // Attacker (sender) tries to resolve dispute with a fund split
+    dispute_client.resolve_dispute_split_funds(&sender, &did(10), &6000);
         token.clone(),
         shared_types::EscrowStatus::Holdback,
     );
