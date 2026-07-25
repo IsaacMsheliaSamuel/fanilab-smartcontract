@@ -1,6 +1,10 @@
 #![no_std]
 #![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
+use shared_types::{
+    events, DriverInvitedEvent, DriverRemovedEvent, FleetRegisteredEvent,
+    FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
+};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal,
     Symbol,
@@ -9,6 +13,9 @@ use soroban_sdk::{
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 pub type FleetId = u64;
+
+/// Maximum number of drivers per fleet roster to prevent unbounded storage growth.
+pub const MAX_ROSTER_SIZE: u32 = 10000;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -55,6 +62,8 @@ pub enum DataKey {
     Fleet(FleetId),
     /// Persistent key — driver's status within a fleet (Pending | Active).
     DriverFleet(FleetId, Address),
+    /// Persistent key — roster of drivers (addresses) in a fleet, for enumeration.
+    FleetRoster(FleetId),
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -137,17 +146,28 @@ impl FleetManagementContract {
             .instance()
             .get::<DataKey, Address>(&DataKey::IdentityContract)
         {
-            let _: () = env.invoke_contract(
+            let has_profile: bool = env.invoke_contract(
                 &identity_addr,
-                &Symbol::new(&env, "register_driver"),
+                &Symbol::new(&env, "has_driver_profile"),
                 soroban_sdk::vec![&env, owner.clone().into_val(&env)],
             );
+            if !has_profile {
+                let _: () = env.invoke_contract(
+                    &identity_addr,
+                    &Symbol::new(&env, "register_driver"),
+                    soroban_sdk::vec![&env, owner.clone().into_val(&env)],
+                );
+            }
         }
 
         // Emit event: topic = "fleet_registered", data = (fleet_id, owner, treasury).
         env.events().publish(
-            (Symbol::new(&env, "fleet_registered"),),
-            (fleet_id, owner, treasury),
+            (events::fleet_registered(&env),),
+            FleetRegisteredEvent {
+                fleet_id,
+                owner,
+                treasury,
+            },
         );
 
         fleet_id
@@ -185,8 +205,12 @@ impl FleetManagementContract {
             .extend_ttl(&fleet_key, 518400, 518400);
 
         env.events().publish(
-            (Symbol::new(&env, "fleet_treasury_updated"),),
-            (fleet_id, owner, treasury),
+            (events::fleet_treasury_updated(&env),),
+            FleetTreasuryUpdatedEvent {
+                fleet_id,
+                owner,
+                treasury,
+            },
         );
     }
 
@@ -235,7 +259,7 @@ impl FleetManagementContract {
 
         // Emit event.
         env.events()
-            .publish((Symbol::new(&env, "driver_invited"),), (fleet_id, driver));
+            .publish((events::driver_invited(&env),), DriverInvitedEvent { fleet_id, driver });
     }
 
     // ── Issue #69 — accept_fleet_invite ───────────────────────────────────────
@@ -284,9 +308,41 @@ impl FleetManagementContract {
             .persistent()
             .extend_ttl(&fleet_key, 518400, 518400);
 
+        // Add driver to fleet roster for enumeration.
+        let roster_key = DataKey::FleetRoster(fleet_id);
+        let mut roster: soroban_sdk::Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&roster_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+
+        // Guard against unbounded roster growth.
+        if roster.len() >= MAX_ROSTER_SIZE as u32 {
+            panic_with_error!(&env, FleetError::FleetNotFound);
+        }
+
+        // Avoid duplicate roster entries: check if driver already in roster.
+        let mut already_in_roster = false;
+        for i in 0..roster.len() {
+            if let Some(existing) = roster.get(i) {
+                if existing == driver {
+                    already_in_roster = true;
+                    break;
+                }
+            }
+        }
+
+        if !already_in_roster {
+            roster.push_back(driver.clone());
+            env.storage().persistent().set(&roster_key, &roster);
+            env.storage()
+                .persistent()
+                .extend_ttl(&roster_key, 518400, 518400);
+        }
+
         // Emit event.
         env.events()
-            .publish((Symbol::new(&env, "invite_accepted"),), (fleet_id, driver));
+            .publish((events::invite_accepted(&env),), InviteAcceptedEvent { fleet_id, driver });
     }
 
     // ── Issue #70 — remove_driver_from_fleet ──────────────────────────────────
@@ -332,9 +388,30 @@ impl FleetManagementContract {
         // Remove the driver's fleet record.
         env.storage().persistent().remove(&invite_key);
 
+        // Remove driver from fleet roster.
+        let roster_key = DataKey::FleetRoster(fleet_id);
+        if let Some(mut roster) = env.storage().persistent().get::<_, soroban_sdk::Vec<Address>>(&roster_key) {
+            let mut new_roster = soroban_sdk::Vec::new(&env);
+            for i in 0..roster.len() {
+                if let Some(existing) = roster.get(i) {
+                    if existing != driver {
+                        new_roster.push_back(existing);
+                    }
+                }
+            }
+            if new_roster.len() > 0 {
+                env.storage().persistent().set(&roster_key, &new_roster);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&roster_key, 518400, 518400);
+            } else {
+                env.storage().persistent().remove(&roster_key);
+            }
+        }
+
         // Emit event.
         env.events()
-            .publish((Symbol::new(&env, "driver_removed"),), (fleet_id, driver));
+            .publish((events::driver_removed(&env),), DriverRemovedEvent { fleet_id, driver });
     }
 
     // ── Issue #72 — get_payout_address ───────────────────────────────────────
@@ -373,6 +450,16 @@ impl FleetManagementContract {
         env.storage()
             .persistent()
             .get(&DataKey::DriverFleet(fleet_id, driver))
+    }
+
+    /// Return the roster of all drivers (both Pending and Active) for a fleet.
+    /// Returns an empty Vec if no drivers are in the fleet.
+    pub fn get_fleet_roster(env: Env, fleet_id: FleetId) -> soroban_sdk::Vec<Address> {
+        let roster_key = DataKey::FleetRoster(fleet_id);
+        env.storage()
+            .persistent()
+            .get(&roster_key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
     }
 }
 
