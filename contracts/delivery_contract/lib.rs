@@ -296,6 +296,43 @@ impl DeliveryContract {
         result
     }
 
+    pub fn update_delivery_metadata(
+        env: Env,
+        sender: Address,
+        delivery_id: DeliveryId,
+        metadata: DeliveryMetadata,
+    ) {
+        sender.require_auth();
+
+        let key = delivery_key(delivery_id);
+        let mut delivery: DeliveryRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
+
+        if delivery.sender != sender {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+
+        if delivery.status != DeliveryStatus::Pending {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
+        validate_delivery_metadata(&env, &metadata)
+            .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
+
+        delivery.metadata = metadata;
+
+        env.storage().persistent().set(&key, &delivery);
+        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+
+        env.events().publish(
+            (Symbol::new(&env, "delivery_metadata_updated"),),
+            (delivery_id, sender),
+        );
+    }
+
     pub fn cancel_delivery(env: Env, sender: Address, delivery_id: DeliveryId) {
         sender.require_auth();
 
