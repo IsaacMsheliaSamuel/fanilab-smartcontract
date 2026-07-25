@@ -8,6 +8,8 @@ use soroban_sdk::{
 };
 
 const DISPUTE_REPUTATION_PENALTY: u32 = 10;
+const DISPUTE_REPUTATION_REWARD: u32 = 5;
+const DISPUTE_REPUTATION_SPLIT_PENALTY: u32 = 5;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -362,6 +364,32 @@ impl DisputeResolutionContract {
             );
         }
 
+        // Apply a partial reputation penalty to the driver for a split outcome
+        let delivery_contract_addr = Self::get_delivery_contract(env.clone());
+        let delivery: shared_types::DeliveryRecord = env.invoke_contract(
+            &delivery_contract_addr,
+            &Symbol::new(&env, "get_delivery"),
+            soroban_sdk::vec![&env, delivery_id.into_val(&env)],
+        );
+        if let Some(driver) = delivery.driver {
+            if let Some(reputation_addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::IdentityReputationContract)
+            {
+                let _: () = env.invoke_contract(
+                    &reputation_addr,
+                    &Symbol::new(&env, "decrease_reputation"),
+                    soroban_sdk::vec![
+                        &env,
+                        env.current_contract_address().into_val(&env),
+                        driver.clone().into_val(&env),
+                        DISPUTE_REPUTATION_SPLIT_PENALTY.into_val(&env),
+                    ],
+                );
+            }
+        }
+
         env.events().publish(
             (Symbol::new(&env, "dispute_resolved_split"), delivery_id),
             (caller, delivery_id),
@@ -404,6 +432,32 @@ impl DisputeResolutionContract {
                 true.into_val(&env),
             ],
         );
+
+        // Increase driver reputation when they are vindicated
+        let delivery_contract_addr = Self::get_delivery_contract(env.clone());
+        let delivery: shared_types::DeliveryRecord = env.invoke_contract(
+            &delivery_contract_addr,
+            &Symbol::new(&env, "get_delivery"),
+            soroban_sdk::vec![&env, delivery_id.into_val(&env)],
+        );
+        if let Some(driver) = delivery.driver {
+            if let Some(reputation_addr) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::IdentityReputationContract)
+            {
+                let _: () = env.invoke_contract(
+                    &reputation_addr,
+                    &Symbol::new(&env, "increase_reputation"),
+                    soroban_sdk::vec![
+                        &env,
+                        env.current_contract_address().into_val(&env),
+                        driver.clone().into_val(&env),
+                        DISPUTE_REPUTATION_REWARD.into_val(&env),
+                    ],
+                );
+            }
+        }
 
         env.events().publish(
             (Symbol::new(&env, "dispute_resolved_payout"), delivery_id),
