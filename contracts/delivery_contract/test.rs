@@ -3,7 +3,12 @@ extern crate std;
 use super::*;
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol};
 
-// ── Mock Escrow Contract with call tracking and failure simulation ───────────────────────────────────
+// ── Issue #95: State Rollback on Escrow Failure ──────────────────────────────────────────────────
+// This module implements comprehensive testing for the contract's safety invariant:
+// Cross-contract escrow calls execute BEFORE local state mutations, ensuring atomicity
+// and preventing state corruption when cross-contract calls fail.
+
+// ── Mock Escrow Contract with call tracking and failure simulation ───────────────────────────────────────
 
 #[contract]
 pub struct MockEscrowContract;
