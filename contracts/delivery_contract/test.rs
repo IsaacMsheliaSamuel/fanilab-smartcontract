@@ -866,3 +866,226 @@ fn test_delivery_state_unchanged_after_raise_dispute_escrow_failure() {
     let delivery_after = client.get_delivery(&delivery_id);
     assert_eq!(delivery_after.status, DeliveryStatus::InTransit, "Delivery status should not change to Disputed");
 }
+
+// ── ISSUE #97: Update Delivery Metadata Tests ──────────────────────────────────
+
+#[test]
+fn test_update_delivery_metadata_while_pending() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let updated_metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "New Origin"),
+        destination: String::from_str(&env, "New Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 500,
+            category: CargoCategory::Electronics,
+            fragile: true,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 172800,
+    };
+
+    client.update_delivery_metadata(&shipper, &delivery_id, &updated_metadata);
+
+    let updated_delivery = client.get_delivery(&delivery_id);
+    assert_eq!(updated_delivery.metadata.origin, String::from_str(&env, "New Origin"));
+    assert_eq!(updated_delivery.metadata.destination, String::from_str(&env, "New Destination"));
+    assert_eq!(updated_delivery.metadata.cargo_description.weight_grams, 500);
+    assert_eq!(updated_delivery.metadata.cargo_description.fragile, true);
+}
+
+#[test]
+#[should_panic(expected = "5")]
+fn test_reject_update_metadata_after_driver_assigned() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let updated_metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "New Origin"),
+        destination: String::from_str(&env, "New Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 500,
+            category: CargoCategory::Electronics,
+            fragile: true,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 172800,
+    };
+
+    client.update_delivery_metadata(&shipper, &delivery_id, &updated_metadata);
+}
+
+#[test]
+#[should_panic(expected = "1")]
+fn test_unauthorized_update_metadata_wrong_sender() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    let unauthorized = Address::generate(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let updated_metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "New Origin"),
+        destination: String::from_str(&env, "New Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 500,
+            category: CargoCategory::Electronics,
+            fragile: true,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 172800,
+    };
+
+    client.update_delivery_metadata(&unauthorized, &delivery_id, &updated_metadata);
+}
+
+#[test]
+#[should_panic(expected = "InvalidMetadata")]
+fn test_reject_update_metadata_with_empty_origin() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let updated_metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, ""),
+        destination: String::from_str(&env, "New Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 500,
+            category: CargoCategory::Electronics,
+            fragile: true,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 172800,
+    };
+
+    client.update_delivery_metadata(&shipper, &delivery_id, &updated_metadata);
+}
+
+// ── ISSUE #98: Lateness Detection Tests ────────────────────────────────────────
+
+#[test]
+fn test_on_time_delivery_confirmation() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let current_time = env.ledger().timestamp();
+    let estimated_time = current_time + 86400;
+
+    let metadata = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "Origin"),
+        destination: String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: current_time,
+        estimated_delivery: estimated_time,
+    };
+
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    env.ledger().with_mut(|l| {
+        l.set_timestamp(estimated_time - 3600);
+    });
+
+    client.confirm_delivery(&recipient, &delivery_id);
+
+    let delivery = client.get_delivery(&delivery_id);
+    assert_eq!(delivery.status, DeliveryStatus::Delivered);
+    assert!(delivery.delivered_at.unwrap_or(0) <= estimated_time, "Delivery should be on-time");
+}
+
+#[test]
+fn test_late_delivery_confirmation() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let current_time = env.ledger().timestamp();
+    let estimated_time = current_time + 86400;
+
+    let metadata = DeliveryMetadata {
+        delivery_id: 2,
+        origin: String::from_str(&env, "Origin"),
+        destination: String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: current_time,
+        estimated_delivery: estimated_time,
+    };
+
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    env.ledger().with_mut(|l| {
+        l.set_timestamp(estimated_time + 43200);
+    });
+
+    client.confirm_delivery(&recipient, &delivery_id);
+
+    let delivery = client.get_delivery(&delivery_id);
+    assert_eq!(delivery.status, DeliveryStatus::Delivered);
+    assert!(delivery.delivered_at.unwrap_or(0) > estimated_time, "Delivery should be late");
+}
+
+#[test]
+fn test_early_delivery_confirmation() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let current_time = env.ledger().timestamp();
+    let estimated_time = current_time + 86400;
+
+    let metadata = DeliveryMetadata {
+        delivery_id: 3,
+        origin: String::from_str(&env, "Origin"),
+        destination: String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: current_time,
+        estimated_delivery: estimated_time,
+    };
+
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    env.ledger().with_mut(|l| {
+        l.set_timestamp(estimated_time - 86400);
+    });
+
+    client.confirm_delivery(&recipient, &delivery_id);
+
+    let delivery = client.get_delivery(&delivery_id);
+    assert_eq!(delivery.status, DeliveryStatus::Delivered);
+    assert!(delivery.delivered_at.unwrap_or(0) < estimated_time, "Delivery should be early");
+}
