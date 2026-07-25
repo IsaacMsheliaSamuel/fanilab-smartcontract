@@ -166,8 +166,8 @@ impl DisputeResolutionContract {
             soroban_sdk::vec![&env, delivery_id.into_val(&env)],
         );
 
-        // Verify the caller is sender or recipient
-        if caller != delivery.sender && caller != delivery.recipient {
+        // Verify the caller is sender, recipient, or driver
+        if caller != delivery.sender && caller != delivery.recipient && Some(caller.clone()) != delivery.driver {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
@@ -258,7 +258,7 @@ impl DisputeResolutionContract {
             soroban_sdk::vec![&env, delivery_id.into_val(&env)],
         );
 
-        if caller != delivery.sender && caller != delivery.recipient {
+        if caller != delivery.sender && caller != delivery.recipient && Some(caller.clone()) != delivery.driver {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
