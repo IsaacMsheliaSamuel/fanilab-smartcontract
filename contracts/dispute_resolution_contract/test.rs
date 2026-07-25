@@ -645,3 +645,35 @@ fn test_unauthorized_resolve_pay_driver_fails() {
     // Attacker (sender) tries to resolve dispute pay driver
     dispute_client.resolve_dispute_pay_driver(&sender, &did(9));
 }
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+fn test_unauthorized_resolve_split_funds_fails() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(10),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(10), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Paused,
+    );
+    set_mock_escrow(&env, &escrow_id, 10, &escrow_record);
+
+    dispute_client.raise_dispute(&sender, &did(10));
+
+    // Attacker (sender) tries to resolve dispute with a fund split
+    dispute_client.resolve_dispute_split_funds(&sender, &did(10), &6000);
+}
