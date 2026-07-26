@@ -818,3 +818,74 @@ pub struct DeliveryMetadata {
     pub created_at: u64,
     pub estimated_delivery: u64,
 }
+
+pub mod governance {
+    use soroban_sdk::{Address, Env, Vec};
+
+    #[contracttype]
+    #[derive(Clone)]
+    pub enum AdminDataKey {
+        SingleAdmin,
+        AdminSet,
+    }
+
+    pub struct AdminManager;
+
+    impl AdminManager {
+        pub fn is_single_admin(env: &Env, caller: &Address, storage_key: &AdminDataKey) -> bool {
+            if let Some(admin) = env.storage().instance().get::<_, Address>(storage_key) {
+                *caller == admin
+            } else {
+                false
+            }
+        }
+
+        pub fn is_multi_admin(env: &Env, caller: &Address, storage_key: &AdminDataKey) -> bool {
+            if let Some(admins) = env.storage().instance().get::<_, Vec<Address>>(storage_key) {
+                admins.iter().any(|a| a == *caller)
+            } else {
+                false
+            }
+        }
+
+        pub fn list_admins(env: &Env, storage_key: &AdminDataKey) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get::<_, Vec<Address>>(storage_key)
+                .unwrap_or_else(|| Vec::new(env))
+        }
+
+        pub fn add_admin_to_set(env: &Env, new_admin: Address, storage_key: &AdminDataKey) {
+            let mut admins: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(storage_key)
+                .unwrap_or_else(|| Vec::new(env));
+
+            if !admins.iter().any(|a| a == new_admin) {
+                admins.push_back(new_admin);
+                env.storage().instance().set(storage_key, &admins);
+            }
+        }
+
+        pub fn remove_admin_from_set(
+            env: &Env,
+            old_admin: Address,
+            storage_key: &AdminDataKey,
+        ) {
+            let admins: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(storage_key)
+                .unwrap_or_else(|| Vec::new(env));
+
+            let mut new_admins = Vec::new(env);
+            for admin in admins.iter() {
+                if admin != old_admin {
+                    new_admins.push_back(admin);
+                }
+            }
+            env.storage().instance().set(storage_key, &new_admins);
+        }
+    }
+}
