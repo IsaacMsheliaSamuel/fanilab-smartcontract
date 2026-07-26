@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `escrow_contract::create_escrow` now validates `token` matches the protocol-configured token
 - `fleet_management_contract::register_fleet` checks driver profile existence before calling `register_driver`, preventing panic for already-registered drivers
+- Enhanced CI pipeline with linting and testing
+- Improved error handling across all contracts
+- Optimized storage TTL management
+- **Upgraded Soroban SDK from 22.0.1 to 27.0.0** with full ecosystem compatibility
+- **Updated WASM build target from `wasm32-unknown-unknown` to `wasm32v1-none`** for Soroban SDK 27.0.0 compatibility
+- **Pinned Rust toolchain to 1.81.0** in CI workflows for consistent compilation across environments
+- Added `#[allow(deprecated)]` annotations for SDK 27.0.0 `env.events().publish()` API deprecation (remains functional)
 
 ### Removed
 - `escrow_contract::get_status` — dead stub that always returned `DeliveryStatus::Pending`. Use `get_escrow(id).status` instead.
@@ -35,12 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dispute split resolution mechanism
 - Driver reputation tracking system
 - Delivery transit status tracking
-
-### Changed
-- Enhanced CI pipeline with linting and testing
-- Improved error handling across all contracts
-- Optimized storage TTL management
-- Updated Soroban SDK to 22.0.1
 
 ### Security
 - Added balance verification before transfers
