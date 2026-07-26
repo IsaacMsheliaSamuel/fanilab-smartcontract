@@ -150,9 +150,19 @@ This document outlines the security audit checklist for FaniLab Smart Contracts 
 ### Unit Tests
 ```bash
 # Run all security-focused unit tests
-cargo test security_
-cargo test access_control_
-cargo test state_transition_
+# Test authorization/access control functionality
+cargo test unauthorized
+cargo test admin
+cargo test auth
+
+# Test state machine/transition functionality
+cargo test state
+cargo test transition
+cargo test invalid_state
+
+# Test security-specific functionality
+cargo test permission
+cargo test security
 ```
 
 ### Fuzzing
