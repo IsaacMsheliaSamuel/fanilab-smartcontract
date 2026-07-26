@@ -10,8 +10,8 @@ updates:
     reviewers:
       - "fanilab-team"
     labels:
-      - "dependencies"
-      - "rust"
+      - "refactor"
+      - "enhancement"
     commit-message:
       prefix: "chore"
       include: "scope"
@@ -23,7 +23,7 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     labels:
-      - "dependencies"
-      - "github-actions"
+      - "refactor"
+      - "test"
     commit-message:
       prefix: "ci"

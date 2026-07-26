@@ -66,12 +66,16 @@ FaniLab is a blockchain-powered logistics and escrow delivery platform built on 
 - **Review Process**: All PRs require 2 maintainer approvals
 
 ### Issue Labels
-- `good-first-issue`: Beginner-friendly tasks
-- `help-wanted`: Open for contributors
-- `high-priority`: Critical for next release
-- `documentation`: Docs improvements
+- `good first issue`: Beginner-friendly tasks
+- `help wanted`: Open for contributors
 - `bug`: Bug fixes needed
 - `feature`: New functionality
+- `enhancement`: Improvements to existing features
+- `documentation`: Docs improvements
+- `refactor`: Code structure improvements
+- `test`: Testing-related work
+- `security`: Security-related issues
+- `performance`: Performance improvements
 
 ### Skill Levels
 - **Beginner**: Documentation, testing, small bug fixes

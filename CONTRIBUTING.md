@@ -90,7 +90,7 @@ cargo test
 We believe the community should drive the project's priorities. 
 
 ### Tackling Existing Issues
-When looking for something to work on, please check the GitHub Issues tab. We highly recommend starting with issues labeled `shared-types` if you are new, as building the core data structures is the first step before implementing contract logic.
+When looking for something to work on, please check the GitHub Issues tab. We highly recommend starting with issues labeled `good first issue` or `help wanted` if you are new, as these are suitable for contributors getting familiar with the codebase.
 
 ### Requesting a New Feature
 1.  **Check existing requests**: Browse existing Issues to see if someone has already suggested it.

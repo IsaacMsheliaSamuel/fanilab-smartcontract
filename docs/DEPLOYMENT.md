@@ -143,11 +143,11 @@ cargo tarpaulin --out Html --output-dir coverage
 # Deploy to local network for testing
 stellar network start local
 
-# Deploy contracts locally
-./scripts/deploy-local-test.sh
+# Deploy contracts locally using existing scripts
+./scripts/deploy-all-contracts.sh local
 
-# Run integration tests
-cargo test --test integration_tests
+# Run contract tests
+cargo test --verbose
 
 # Stop local network
 stellar network stop local
@@ -340,14 +340,12 @@ stellar contract deploy \
   --source deployer \
   --network $STELLAR_NETWORK
 
-# Update references in dependent contracts
-stellar contract invoke \
-  --id $DELIVERY_CONTRACT_ID \
-  --source admin \
-  --network $STELLAR_NETWORK \
-  -- update_escrow_contract \
-  --new_escrow_contract $OLD_ESCROW_CONTRACT_ID
+# Important Note: The current delivery contract does not have an escrow contract setter function.
+# To update escrow contract references, you must redeploy the delivery contract with the new escrow address.
+# Alternatively, create a new delivery contract deployment with the rollback escrow address.
 ```
+
+**Note on Contract Dependencies**: Currently, the delivery contract stores the escrow contract address during initialization and does not provide a setter function. Rollback procedures involving escrow contract updates require redeployment of dependent contracts.
 
 ### Emergency Procedures
 1. **Pause Operations**: Call admin pause functions if available
