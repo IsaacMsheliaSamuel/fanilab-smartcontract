@@ -47,8 +47,9 @@ mod constants {
 ///   Pending   → Active, Cancelled
 ///   Active    → InTransit, Disputed, Cancelled
 ///   InTransit → Delivered, Disputed
-///   Disputed  → Delivered, Cancelled
-///   Delivered, Cancelled → (terminal, no transitions)
+///   Delivered → Disputed
+///   Disputed  → Delivered (only via dispute resolution)
+///   Cancelled → (terminal, no transitions)
 pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(), FaniLabError> {
     let valid = match (from, to) {
         (DeliveryStatus::Pending, DeliveryStatus::Active) => true,
@@ -58,8 +59,8 @@ pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(
         (DeliveryStatus::Active, DeliveryStatus::Cancelled) => true,
         (DeliveryStatus::InTransit, DeliveryStatus::Delivered) => true,
         (DeliveryStatus::InTransit, DeliveryStatus::Disputed) => true,
+        (DeliveryStatus::Delivered, DeliveryStatus::Disputed) => true,
         (DeliveryStatus::Disputed, DeliveryStatus::Delivered) => true,
-        (DeliveryStatus::Disputed, DeliveryStatus::Cancelled) => true,
         _ => false,
     };
     if valid {
