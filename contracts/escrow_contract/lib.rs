@@ -130,6 +130,43 @@ fn payout_driver(
     token::Client::new(env, token).transfer(&env.current_contract_address(), &payout_address, &amount);
 }
 
+fn settle_escrow_funds(
+    env: &Env,
+    record: &EscrowRecord,
+    fleet_management_addr: Option<Address>,
+) {
+    let platform_fee_bps: u32 = env
+        .storage()
+        .instance()
+        .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
+        .map(|config| config.platform_fee_bps)
+        .unwrap_or(0);
+    let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+    let driver_amount = record.amount.saturating_sub(platform_fee);
+
+    payout_driver(
+        &env,
+        &record.token,
+        &record.driver,
+        driver_amount,
+        fleet_management_addr.as_ref(),
+        record.fleet_id,
+    );
+
+    if platform_fee > 0 {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("Not initialized");
+        token::Client::new(&env, &record.token).transfer(
+            &env.current_contract_address(),
+            &admin,
+            &platform_fee,
+        );
+    }
+}
+
 fn save_escrow(env: &Env, delivery_id: u64, record: &EscrowRecord) {
     let key = escrow_key(delivery_id);
     env.storage().persistent().set(&key, record);
@@ -698,6 +735,7 @@ impl EscrowContract {
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
+
         let platform_fee_bps: u32 = env
             .storage()
             .instance()
@@ -708,27 +746,7 @@ impl EscrowContract {
         let driver_amount = record.amount.saturating_sub(platform_fee);
 
         let fleet_management = get_fleet_management_contract(&env);
-        payout_driver(
-            &env,
-            &record.token,
-            &record.driver,
-            driver_amount,
-            fleet_management.as_ref(),
-            record.fleet_id,
-        );
-
-        if platform_fee > 0 {
-            let admin: Address = env
-                .storage()
-                .instance()
-                .get(&StorageKey::Admin)
-                .expect("Not initialized");
-            token::Client::new(&env, &record.token).transfer(
-                &env.current_contract_address(),
-                &admin,
-                &platform_fee,
-            );
-        }
+        settle_escrow_funds(&env, &record, fleet_management);
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
@@ -817,38 +835,8 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
         if release_to_driver {
-            let platform_fee_bps: u32 = env
-                .storage()
-                .instance()
-                .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
-                .map(|config| config.platform_fee_bps)
-                .unwrap_or(0);
-            let platform_fee = calculate_fee(record.amount, platform_fee_bps);
-            let driver_amount = record.amount.saturating_sub(platform_fee);
-
             let fleet_management = get_fleet_management_contract(&env);
-            payout_driver(
-                &env,
-                &record.token,
-                &record.driver,
-                driver_amount,
-                fleet_management.as_ref(),
-                record.fleet_id,
-            );
-
-            if platform_fee > 0 {
-                let admin: Address = env
-                    .storage()
-                    .instance()
-                    .get(&StorageKey::Admin)
-                    .expect("Not initialized");
-                token::Client::new(&env, &record.token).transfer(
-                    &env.current_contract_address(),
-                    &admin,
-                    &platform_fee,
-                );
-            }
-
+            settle_escrow_funds(&env, &record, fleet_management);
             record.status = EscrowStatus::Released;
         } else {
             let contract_balance =
@@ -946,6 +934,7 @@ impl EscrowContract {
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
+
         let platform_fee_bps: u32 = env
             .storage()
             .instance()
@@ -955,20 +944,8 @@ impl EscrowContract {
         let platform_fee = calculate_fee(record.amount, platform_fee_bps);
         let driver_amount = record.amount.saturating_sub(platform_fee);
 
-        payout_driver(&env, &record.token, &record.driver, driver_amount);
-
-        if platform_fee > 0 {
-            let admin: Address = env
-                .storage()
-                .instance()
-                .get(&StorageKey::Admin)
-                .expect("Not initialized");
-            token::Client::new(&env, &record.token).transfer(
-                &env.current_contract_address(),
-                &admin,
-                &platform_fee,
-            );
-        }
+        let fleet_management = get_fleet_management_contract(&env);
+        settle_escrow_funds(&env, &record, fleet_management);
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
