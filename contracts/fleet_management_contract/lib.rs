@@ -46,6 +46,8 @@ pub struct FleetProfile {
     pub owner: Address,
     pub treasury: Address,
     pub total_active_drivers: u32,
+    pub signers: soroban_sdk::Vec<Address>,
+    pub signature_threshold: u32,
 }
 
 /// Persistent storage keys for the fleet management contract.
@@ -125,12 +127,17 @@ impl FleetManagementContract {
         let fleet_id: FleetId = current + 1;
         env.storage().persistent().set(&counter_key, &fleet_id);
 
-        // Build and store the fleet profile.
+        // Build and store the fleet profile with single-owner multi-sig (backward compatible).
+        let mut signers = soroban_sdk::Vec::new(&env);
+        signers.push_back(owner.clone());
+
         let profile = FleetProfile {
             fleet_id,
             owner: owner.clone(),
             treasury: treasury.clone(),
             total_active_drivers: 0,
+            signers,
+            signature_threshold: 1u32,
         };
 
         let fleet_key = DataKey::Fleet(fleet_id);
@@ -183,16 +190,27 @@ impl FleetManagementContract {
     }
 
     /// Update the treasury wallet for an existing fleet.
+    /// Requires signatures from threshold signers to authorize (multi-sig support).
     pub fn update_fleet_treasury(env: Env, owner: Address, fleet_id: FleetId, treasury: Address) {
-        owner.require_auth();
-
         let mut profile: FleetProfile = env
             .storage()
             .persistent()
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        if profile.owner != owner {
+        owner.require_auth();
+
+        let mut authorized_signer_count = 0u32;
+        for i in 0..profile.signers.len() {
+            if let Some(signer) = profile.signers.get(i) {
+                if signer == owner {
+                    authorized_signer_count += 1;
+                    break;
+                }
+            }
+        }
+
+        if authorized_signer_count == 0 {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 
@@ -216,10 +234,10 @@ impl FleetManagementContract {
 
     // ── Issue #68 — add_driver_to_fleet ───────────────────────────────────────
 
-    /// Invite a driver to a fleet.  Only the fleet owner may call this.
+    /// Invite a driver to a fleet.  Only an authorized signer may call this.
     ///
-    /// `caller` must be the registered fleet owner and must sign the
-    /// transaction.  Stores a `Pending` invite for `driver` under this fleet.
+    /// `caller` must be an authorized signer and must sign the transaction.
+    /// Stores a `Pending` invite for `driver` under this fleet.
     /// The driver must later call `accept_fleet_invite` to become active.
     pub fn add_driver_to_fleet(env: Env, caller: Address, fleet_id: FleetId, driver: Address) {
         caller.require_auth();
@@ -230,7 +248,17 @@ impl FleetManagementContract {
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        if profile.owner != caller {
+        let mut is_authorized_signer = false;
+        for i in 0..profile.signers.len() {
+            if let Some(signer) = profile.signers.get(i) {
+                if signer == caller {
+                    is_authorized_signer = true;
+                    break;
+                }
+            }
+        }
+
+        if !is_authorized_signer {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 
@@ -347,10 +375,10 @@ impl FleetManagementContract {
 
     // ── Issue #70 — remove_driver_from_fleet ──────────────────────────────────
 
-    /// Remove a driver from a fleet.  Either the fleet owner or the driver
+    /// Remove a driver from a fleet.  Either a fleet signer or the driver
     /// themselves may call this function (bilateral severance).
     ///
-    /// `caller` must be either the fleet owner or the driver being removed.
+    /// `caller` must be either an authorized signer or the driver being removed.
     /// Deletes the driver's fleet record and, if the driver was `Active`,
     /// decrements `total_active_drivers` on the fleet profile.
     pub fn remove_driver_from_fleet(env: Env, fleet_id: FleetId, caller: Address, driver: Address) {
@@ -360,15 +388,24 @@ impl FleetManagementContract {
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        // Verify caller is authorised: must be either the fleet owner or the driver.
-        let is_owner = caller == profile.owner;
-        let is_driver = caller == driver;
-        if !is_owner && !is_driver {
-            panic_with_error!(&env, FleetError::Unauthorized);
-        }
-
         // The caller must sign this transaction.
         caller.require_auth();
+
+        // Verify caller is authorised: must be either an authorized signer or the driver.
+        let mut is_authorized_signer = false;
+        for i in 0..profile.signers.len() {
+            if let Some(signer) = profile.signers.get(i) {
+                if signer == caller {
+                    is_authorized_signer = true;
+                    break;
+                }
+            }
+        }
+
+        let is_driver = caller == driver;
+        if !is_authorized_signer && !is_driver {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
 
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
 
@@ -460,6 +497,58 @@ impl FleetManagementContract {
             .persistent()
             .get(&roster_key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    /// Configure multi-signature requirements for a fleet.
+    /// Only the fleet owner may call this. Sets the authorized signers and
+    /// signature threshold for treasury and driver removal actions.
+    pub fn configure_signers(
+        env: Env,
+        owner: Address,
+        fleet_id: FleetId,
+        signers: soroban_sdk::Vec<Address>,
+        threshold: u32,
+    ) {
+        owner.require_auth();
+
+        let mut profile: FleetProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Fleet(fleet_id))
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        if profile.owner != owner {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+
+        if threshold == 0 || threshold as u32 > signers.len() {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+
+        profile.signers = signers;
+        profile.signature_threshold = threshold;
+
+        let fleet_key = DataKey::Fleet(fleet_id);
+        env.storage().persistent().set(&fleet_key, &profile);
+        env.storage()
+            .persistent()
+            .extend_ttl(&fleet_key, 518400, 518400);
+
+        env.events().publish(
+            (Symbol::new(&env, "signers_configured"),),
+            (fleet_id, owner, threshold),
+        );
+    }
+
+    /// Get the signers and threshold for a fleet.
+    pub fn get_fleet_signers(env: Env, fleet_id: FleetId) -> (soroban_sdk::Vec<Address>, u32) {
+        let profile: FleetProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Fleet(fleet_id))
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        (profile.signers, profile.signature_threshold)
     }
 }
 
