@@ -663,3 +663,43 @@ fn test_cannot_reclaim_released_escrow() {
         _ => panic!("Expected FaniLabError::Unauthorized"),
     }
 }
+
+#[test]
+fn test_contract_upgrade_preserves_protocol_config() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &250);
+
+    let original_fee = client.get_platform_fee();
+    let original_slippage = client.get_slippage_tolerance();
+    let original_admin = client.get_admin();
+    let original_token = client.get_token();
+
+    assert_eq!(original_fee, 250);
+    assert_eq!(original_slippage, 500);
+    assert_eq!(original_admin, admin);
+    assert_eq!(original_token, token);
+
+    let config = shared_types::ProtocolConfig {
+        token: token.clone(),
+        platform_fee_bps: 250,
+        protocol_version: 1,
+        slippage_tolerance_bps: 500,
+    };
+
+    env.storage()
+        .instance()
+        .set(&shared_types::StorageKey::ProtocolConfig, &config);
+
+    let migrated_fee = client.get_platform_fee();
+    let migrated_slippage = client.get_slippage_tolerance();
+
+    assert_eq!(migrated_fee, original_fee);
+    assert_eq!(migrated_slippage, original_slippage);
+}
+}
