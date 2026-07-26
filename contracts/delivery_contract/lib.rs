@@ -1,9 +1,8 @@
 #![no_std]
-#![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 use shared_types::FaniLabError;
 use shared_types::{
-    delivery_key, events, DeliveryCreatedEvent, DeliveryConfirmedEvent, DeliveryDisputedEvent,
+    delivery_key, events, ttl, DeliveryCreatedEvent, DeliveryConfirmedEvent, DeliveryDisputedEvent,
     DriverAssignedEvent, DeliveryMetadata, DriverProfile, StorageKey,
 };
 pub use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus};
@@ -50,6 +49,11 @@ mod constants {
 ///   Delivered → Disputed
 ///   Disputed  → Delivered (only via dispute resolution)
 ///   Cancelled → (terminal, no transitions)
+///   Pending   â†’ Active, Cancelled
+///   Active    â†’ InTransit, Disputed, Cancelled
+///   InTransit â†’ Delivered, Disputed
+///   Disputed  â†’ Delivered, Cancelled
+///   Delivered, Cancelled â†’ (terminal, no transitions)
 pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(), FaniLabError> {
     let valid = match (from, to) {
         (DeliveryStatus::Pending, DeliveryStatus::Active) => true,
@@ -71,13 +75,13 @@ pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(
 }
 
 fn validate_delivery_metadata(env: &Env, metadata: &DeliveryMetadata) -> Result<(), DeliveryError> {
-    if metadata.origin.len() > constants::MAX_LOCATION_LEN {
+    if metadata.origin.len() == 0 || metadata.origin.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
-    if metadata.destination.len() > constants::MAX_LOCATION_LEN {
+    if metadata.destination.len() == 0 || metadata.destination.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
-    if metadata.cargo_description.weight_grams > constants::MAX_WEIGHT_GRAMS {
+    if metadata.cargo_description.weight_grams == 0 || metadata.cargo_description.weight_grams > constants::MAX_WEIGHT_GRAMS {
         return Err(DeliveryError::InvalidMetadata);
     }
     Ok(())
@@ -88,6 +92,7 @@ pub struct DeliveryContract;
 
 #[contractimpl]
 impl DeliveryContract {
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn init(env: Env, admin: Address, escrow_contract: Address) {
         if env.storage().instance().has(&StorageKey::Admin) {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
@@ -131,6 +136,7 @@ impl DeliveryContract {
             .get(&DataKey::IdentityReputationContract)
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn create_delivery(
         env: Env,
         sender: Address,
@@ -168,7 +174,11 @@ impl DeliveryContract {
 
         let key = delivery_key(delivery_id);
         env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Update secondary indexes.
         let sender_key = DataKey::DeliveriesBySender(sender.clone());
@@ -181,7 +191,11 @@ impl DeliveryContract {
         env.storage()
             .persistent()
             .set(&sender_key, &sender_deliveries);
-        env.storage().persistent().extend_ttl(&sender_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &sender_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let recipient_key = DataKey::DeliveriesByRecipient(recipient.clone());
         let mut recipient_deliveries: soroban_sdk::Vec<DeliveryId> = env
@@ -193,7 +207,11 @@ impl DeliveryContract {
         env.storage()
             .persistent()
             .set(&recipient_key, &recipient_deliveries);
-        env.storage().persistent().extend_ttl(&recipient_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &recipient_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::delivery_created(&env),),
@@ -210,6 +228,7 @@ impl DeliveryContract {
     /// Create multiple deliveries in a single transaction.  Sender must authorize.
     /// Returns Vec of created delivery IDs.  Each delivery funds escrow individually
     /// via cross-contract calls to the escrow contract.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn create_deliveries_batch(
         env: Env,
         sender: Address,
@@ -269,7 +288,11 @@ impl DeliveryContract {
 
                 let key = delivery_key(delivery_id);
                 env.storage().persistent().set(&key, &record);
-                env.storage().persistent().extend_ttl(&key, 518400, 518400);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    ttl::LEDGER_TTL_THRESHOLD,
+                    ttl::LEDGER_TTL_EXTEND_TO,
+                );
 
                 sender_deliveries.push_back(delivery_id);
                 recipient_deliveries.push_back(delivery_id);
@@ -287,14 +310,60 @@ impl DeliveryContract {
         env.storage()
             .persistent()
             .set(&sender_key, &sender_deliveries);
-        env.storage().persistent().extend_ttl(&sender_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &sender_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.storage()
             .persistent()
             .set(&recipient_key, &recipient_deliveries);
-        env.storage().persistent().extend_ttl(&recipient_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &recipient_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         result
+    }
+
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn update_delivery_metadata(
+        env: Env,
+        sender: Address,
+        delivery_id: DeliveryId,
+        metadata: DeliveryMetadata,
+    ) {
+        sender.require_auth();
+
+        let key = delivery_key(delivery_id);
+        let mut delivery: DeliveryRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
+
+        if delivery.sender != sender {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+
+        if delivery.status != DeliveryStatus::Pending {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
+        validate_delivery_metadata(&env, &metadata)
+            .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
+
+        delivery.metadata = metadata;
+
+        env.storage().persistent().set(&key, &delivery);
+        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+
+        env.events().publish(
+            (Symbol::new(&env, "delivery_metadata_updated"),),
+            (delivery_id, sender),
+        );
     }
 
     pub fn cancel_delivery(env: Env, sender: Address, delivery_id: DeliveryId) {
@@ -333,7 +402,11 @@ impl DeliveryContract {
 
         delivery.status = DeliveryStatus::Cancelled;
         env.storage().persistent().set(&key, &delivery);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::delivery_cancelled(&env),),
@@ -341,6 +414,7 @@ impl DeliveryContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn assign_driver(env: Env, caller: Address, delivery_id: DeliveryId, driver: Address) {
         caller.require_auth();
 
@@ -369,7 +443,11 @@ impl DeliveryContract {
         delivery.status = DeliveryStatus::Active;
 
         env.storage().persistent().set(&key, &delivery);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::driver_assigned(&env),),
@@ -381,7 +459,8 @@ impl DeliveryContract {
     }
 
     /// Allow the assigned driver to mark a delivery as actively in transit.
-    /// Transitions: Active → InTransit. Records the ledger timestamp.
+    /// Transitions: Active â†’ InTransit. Records the ledger timestamp.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn mark_in_transit(env: Env, driver: Address, delivery_id: DeliveryId) {
         driver.require_auth();
 
@@ -406,7 +485,11 @@ impl DeliveryContract {
         delivery.transit_started_at = Some(timestamp);
 
         env.storage().persistent().set(&key, &delivery);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::delivery_in_transit(&env),),
@@ -414,6 +497,7 @@ impl DeliveryContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn confirm_delivery(env: Env, recipient: Address, delivery_id: DeliveryId) {
         recipient.require_auth();
 
@@ -458,7 +542,11 @@ impl DeliveryContract {
         delivery.delivered_at = Some(env.ledger().timestamp());
 
         env.storage().persistent().set(&key, &delivery);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         if let Some(driver_addr) = &delivery.driver {
             if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
@@ -491,6 +579,7 @@ impl DeliveryContract {
     /// Allow sender or recipient to escalate a delivery to Disputed and pause
     /// the escrow via a cross-contract call. The escrow call executes first so
     /// that delivery state is never mutated when the escrow call fails.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 
@@ -533,7 +622,11 @@ impl DeliveryContract {
         delivery.status = DeliveryStatus::Disputed;
 
         env.storage().persistent().set(&key, &delivery);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::delivery_disputed(&env),),

@@ -91,6 +91,10 @@ pub mod events {
         Symbol::new(env, "fleet_treasury_updated")
     }
 
+    pub fn fleet_treasury_change_proposed(env: &Env) -> Symbol {
+        Symbol::new(env, "fleet_treasury_change_proposed")
+    }
+
     pub fn driver_invited(env: &Env) -> Symbol {
         Symbol::new(env, "driver_invited")
     }
@@ -261,6 +265,21 @@ pub struct FleetTreasuryUpdatedEvent {
     pub owner: Address,
     /// New treasury wallet address.
     pub treasury: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetTreasuryChangeProposedEvent {
+    /// Fleet identifier whose treasury change was proposed.
+    pub fleet_id: u64,
+    /// Fleet owner address that proposed the change.
+    pub owner: Address,
+    /// Current (still-active) treasury wallet address.
+    pub current_treasury: Address,
+    /// Proposed new treasury wallet address.
+    pub proposed_treasury: Address,
+    /// Ledger timestamp after which the change may be confirmed.
+    pub activates_at: u64,
 }
 
 #[contracttype]
@@ -525,9 +544,12 @@ mod test {
         DisputeRaisedEvent, DisputeResolvedEvent, DisputeResolvedPayoutEvent,
         DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, DriverAssignedEvent,
         DriverInvitedEvent, DriverRegisteredEvent, DriverRemovedEvent, EscrowFundedEvent,
-        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError,
-        FleetRegisteredEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
-        KycStatusUpdatedEvent, PartyAddresses, ReputationDecreasedEvent,
+        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError, FleetRegisteredEvent,
+        FleetTreasuryUpdatedEvent, InviteAcceptedEvent, KycStatusUpdatedEvent, PartyAddresses,
+        ReputationDecreasedEvent, ReputationIncreasedEvent, StorageKey, UserRegisteredEvent,
+        EscrowRefundedEvent, EscrowReleasedEvent, EscrowRecord, EscrowState, DeliveryRecord,
+        FaniLabError, FleetRegisteredEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
+        KycStatusUpdatedEvent, PartyAddresses, ProtocolConfig, ReputationDecreasedEvent,
         ReputationIncreasedEvent, StorageKey, UserRegisteredEvent,
     };
     use soroban_sdk::{testutils::Address as _, Address, Env, String};
@@ -771,6 +793,100 @@ mod test {
         assert_eq!(metadata.delivery_id, 1);
         assert_eq!(metadata.created_at, 1000000);
         assert_eq!(metadata.cargo_description.weight_grams, 1000);
+    }
+
+    #[test]
+    fn protocol_config_preserves_fields() {
+        let env = Env::default();
+        let token = Address::generate(&env);
+        let config = ProtocolConfig {
+            token: token.clone(),
+            platform_fee_bps: 500,
+            protocol_version: 1,
+            slippage_tolerance_bps: 100,
+        };
+
+        assert_eq!(config.token, token);
+        assert_eq!(config.platform_fee_bps, 500);
+        assert_eq!(config.protocol_version, 1);
+        assert_eq!(config.slippage_tolerance_bps, 100);
+    }
+
+    #[test]
+    fn delivery_record_preserves_fields() {
+        let env = Env::default();
+        let delivery_id = DeliveryId::new(99);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let driver = Address::generate(&env);
+        let cargo = CargoDescriptor {
+            weight_grams: 2000,
+            category: CargoCategory::Electronics,
+            fragile: true,
+        };
+        let metadata = DeliveryMetadata {
+            delivery_id: 99,
+            origin: String::from_str(&env, "Origin"),
+            destination: String::from_str(&env, "Destination"),
+            cargo_description: cargo,
+            created_at: 5000000,
+            estimated_delivery: 6000000,
+        };
+        let record = DeliveryRecord {
+            delivery_id,
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            driver: Some(driver.clone()),
+            status: DeliveryStatus::InTransit,
+            metadata,
+            created_at: 5000000,
+            delivered_at: Some(5500000),
+            transit_started_at: Some(5100000),
+        };
+
+        assert_eq!(record.delivery_id, delivery_id);
+        assert_eq!(record.sender, sender);
+        assert_eq!(record.recipient, recipient);
+        assert_eq!(record.driver, Some(driver));
+        assert_eq!(record.status, DeliveryStatus::InTransit);
+        assert_eq!(record.created_at, 5000000);
+        assert_eq!(record.delivered_at, Some(5500000));
+        assert_eq!(record.transit_started_at, Some(5100000));
+    }
+
+    #[test]
+    fn escrow_record_preserves_fields() {
+        let env = Env::default();
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let driver = Address::generate(&env);
+        let token = Address::generate(&env);
+        let disputed_by = Address::generate(&env);
+        let record = EscrowRecord {
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+            driver: driver.clone(),
+            token: token.clone(),
+            amount: 1000000,
+            status: EscrowState::Locked,
+            created_at: 7000000,
+            expires_at: Some(8000000),
+            disputed_by: Some(disputed_by.clone()),
+            disputed_at: Some(7500000),
+            fleet_id: Some(42),
+        };
+
+        assert_eq!(record.sender, sender);
+        assert_eq!(record.recipient, recipient);
+        assert_eq!(record.driver, driver);
+        assert_eq!(record.token, token);
+        assert_eq!(record.amount, 1000000);
+        assert_eq!(record.status, EscrowState::Locked);
+        assert_eq!(record.created_at, 7000000);
+        assert_eq!(record.expires_at, Some(8000000));
+        assert_eq!(record.disputed_by, Some(disputed_by));
+        assert_eq!(record.disputed_at, Some(7500000));
+        assert_eq!(record.fleet_id, Some(42));
     }
 }
 #[contracttype]

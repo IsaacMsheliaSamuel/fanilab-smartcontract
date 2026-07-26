@@ -666,6 +666,49 @@ fn test_cannot_reclaim_released_escrow() {
 
 #[test]
 fn test_resolve_dispute_release_to_driver() {
+// ── Issue #90: clear_settlement_contract tests ──────────────────────────────
+
+#[test]
+fn test_clear_settlement_contract_reverts_to_none() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_settlement_contract(&admin, &settlement_contract);
+    assert_eq!(client.get_settlement_contract(), Some(settlement_contract));
+
+    client.clear_settlement_contract(&admin);
+    assert_eq!(client.get_settlement_contract(), None);
+}
+
+#[test]
+fn test_clear_settlement_contract_non_admin_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_settlement_contract(&admin, &settlement_contract);
+
+    let result = client.try_clear_settlement_contract(&attacker);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+}
+
+#[test]
+fn test_clear_settlement_contract_reverts_payout_to_direct_transfer() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -685,6 +728,19 @@ fn test_resolve_dispute_release_to_driver() {
     client.create_escrow(&sender, &recipient, &driver, &300u64, &token, &1000, &None);
     client.freeze_funds(&dispute_contract, &300u64);
     client.resolve_dispute(&admin, &300u64, &true);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.update_platform_fee(&admin, &500); // 5%
+    mint(&env, &token, &sender, 1000);
+
+    client.set_settlement_contract(&admin, &settlement_contract);
+    client.create_escrow(&sender, &recipient, &driver, &300u64, &token, &1000, &None);
+
+    client.clear_settlement_contract(&admin);
+    assert_eq!(client.get_settlement_contract(), None);
+
+    client.release_escrow(&recipient, &300u64);
 
     assert_eq!(balance(&env, &token, &driver), 950);
     assert_eq!(balance(&env, &token, &admin), 50);
@@ -694,6 +750,126 @@ fn test_resolve_dispute_release_to_driver() {
 
 #[test]
 fn test_resolve_dispute_refund_to_sender() {
+}
+
+#[test]
+fn test_clear_nonexistent_settlement_contract_succeeds() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    assert_eq!(client.get_settlement_contract(), None);
+
+    client.clear_settlement_contract(&admin);
+    assert_eq!(client.get_settlement_contract(), None);
+}
+
+// ── Issue #89: propose_admin and accept_admin typed errors ──────────────────
+
+#[test]
+fn test_propose_admin_unauthorized_caller_typed_error() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let attacker = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+
+    let result = client.try_propose_admin(&attacker, &new_admin);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized (typed error), not raw panic"),
+    }
+}
+
+#[test]
+fn test_accept_admin_no_pending_admin_typed_error() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let caller = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+
+    let result = client.try_accept_admin(&caller);
+    match result {
+        Err(Ok(err)) => {
+            assert_ne!(err, FaniLabError::Unauthorized.into());
+            assert!(err.to_string().contains("pending") || err == FaniLabError::InvalidState.into());
+        }
+        _ => panic!("Expected typed error for missing pending admin, not raw panic"),
+    }
+}
+
+#[test]
+fn test_accept_admin_wrong_pending_caller_typed_error() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let new_admin = Address::generate(&env);
+    let wrong_caller = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.propose_admin(&admin, &new_admin);
+
+    let result = client.try_accept_admin(&wrong_caller);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized (typed error), not raw panic"),
+    }
+}
+
+#[test]
+fn test_propose_admin_sets_pending_admin() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let new_admin = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.propose_admin(&admin, &new_admin);
+
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_accept_admin_completes_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let new_admin = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
+
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+// ── Issue #88: resolve_dispute event emission tests ──────────────────────────
+
+#[test]
+fn test_resolve_dispute_release_emits_escrow_released_event() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -720,6 +896,49 @@ fn test_resolve_dispute_refund_to_sender() {
 
 #[test]
 fn test_resolve_dispute_split_50_50() {
+
+    client.init(&admin, &token, &0);
+    client.update_platform_fee(&admin, &500); // 5%
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &400u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &400u64);
+
+    client.resolve_dispute(&admin, &400u64, &true);
+
+    let record = client.get_escrow(&400u64);
+    assert_eq!(record.status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 950);
+    assert_eq!(balance(&env, &token, &admin), 50);
+}
+
+#[test]
+fn test_resolve_dispute_refund_emits_escrow_refunded_event() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &401u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &401u64);
+
+    client.resolve_dispute(&admin, &401u64, &false);
+
+    let record = client.get_escrow(&401u64);
+    assert_eq!(record.status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 1000);
+}
+
+#[test]
+fn test_resolve_dispute_split_emits_event_with_both_amounts() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -747,6 +966,23 @@ fn test_resolve_dispute_split_50_50() {
 
 #[test]
 fn test_resolve_dispute_split_0_100() {
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &402u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &402u64);
+
+    client.resolve_dispute_split(&admin, &402u64, &5000);
+
+    let record = client.get_escrow(&402u64);
+    assert_eq!(record.status, EscrowStatus::Split);
+    assert_eq!(balance(&env, &token, &sender), 500);
+    assert_eq!(balance(&env, &token, &driver), 500);
+}
+
+#[test]
+fn test_resolve_dispute_emits_driver_and_amount_in_event() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -774,6 +1010,25 @@ fn test_resolve_dispute_split_0_100() {
 
 #[test]
 fn test_resolve_dispute_split_100_0() {
+
+    client.init(&admin, &token, &0);
+    client.update_platform_fee(&admin, &1000); // 10%
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &403u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &403u64);
+
+    client.resolve_dispute(&admin, &403u64, &true);
+
+    let record = client.get_escrow(&403u64);
+    assert_eq!(record.driver, driver);
+    assert_eq!(balance(&env, &token, &driver), 900);
+}
+
+// ── Issue #87: Reentrancy and state-update-before-transfer tests ────────────
+
+#[test]
+fn test_release_escrow_updates_state_before_transfer() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -801,6 +1056,20 @@ fn test_resolve_dispute_split_100_0() {
 
 #[test]
 fn test_set_settlement_contract_by_admin() {
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &500u64, &token, &2000, &None);
+    client.release_escrow(&recipient, &500u64);
+
+    let record = client.get_escrow(&500u64);
+    assert_eq!(record.status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 2000);
+}
+
+#[test]
+fn test_refund_escrow_updates_state_before_transfer() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -822,6 +1091,49 @@ fn test_set_settlement_contract_by_admin() {
 
 #[test]
 fn test_set_settlement_contract_unauthorized() {
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &501u64, &token, &2000, &None);
+    client.refund_escrow(&sender, &501u64);
+
+    let record = client.get_escrow(&501u64);
+    assert_eq!(record.status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 2000);
+}
+
+#[test]
+fn test_resolve_dispute_updates_state_before_release_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &502u64, &token, &2000, &None);
+    client.raise_dispute(&sender, &502u64);
+    client.resolve_dispute(&admin, &502u64, &true);
+
+    let record = client.get_escrow(&502u64);
+    assert_eq!(record.status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 2000);
+}
+
+#[test]
+fn test_resolve_dispute_updates_state_before_refund_transfer() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -838,4 +1150,99 @@ fn test_set_settlement_contract_unauthorized() {
         Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
         _ => panic!("Expected FaniLabError::Unauthorized"),
     }
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &503u64, &token, &2000, &None);
+    client.raise_dispute(&sender, &503u64);
+    client.resolve_dispute(&admin, &503u64, &false);
+
+    let record = client.get_escrow(&503u64);
+    assert_eq!(record.status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 2000);
+}
+
+#[test]
+fn test_resolve_dispute_split_updates_state_before_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &504u64, &token, &2000, &None);
+    client.raise_dispute(&sender, &504u64);
+    client.resolve_dispute_split(&admin, &504u64, &3000);
+
+    let record = client.get_escrow(&504u64);
+    assert_eq!(record.status, EscrowStatus::Split);
+    assert_eq!(balance(&env, &token, &sender), 600);
+    assert_eq!(balance(&env, &token, &driver), 1400);
+}
+
+#[test]
+fn test_double_release_prevented_by_state_check() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &505u64, &token, &2000, &None);
+    client.release_escrow(&recipient, &505u64);
+
+    let result = client.try_release_escrow(&admin, &505u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
+        _ => panic!("Expected EscrowError::InvalidState on double-release attempt"),
+    }
+
+    assert_eq!(balance(&env, &token, &driver), 2000);
+}
+
+#[test]
+fn test_cannot_release_already_refunded_escrow() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &506u64, &token, &2000, &None);
+    client.refund_escrow(&sender, &506u64);
+
+    let result = client.try_release_escrow(&admin, &506u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
+        _ => panic!("Expected EscrowError::InvalidState"),
+    }
+
+    assert_eq!(balance(&env, &token, &sender), 2000);
 }

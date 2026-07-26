@@ -1,5 +1,4 @@
 #![no_std]
-#![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 // Settlement contract for cross-border currency swaps
 // This contract will handle currency conversions between different assets
