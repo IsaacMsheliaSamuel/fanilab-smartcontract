@@ -621,3 +621,47 @@ fn test_confirm_delivery_calls_increase_reputation() {
         "Expected reputation increase to be called for driver on delivery confirmation"
     );
 }
+
+#[test]
+fn test_raise_dispute_on_delivered_delivery_updates_status() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _escrow_id, _reputation_id) = setup_full(&env);
+
+    let metadata = get_test_metadata(&env, 1u64);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+    client.confirm_delivery(&recipient, &delivery_id);
+
+    let delivery = client.get_delivery(&delivery_id);
+    assert_eq!(delivery.status, DeliveryStatus::Delivered);
+
+    client.raise_dispute(&recipient, &delivery_id);
+
+    let delivery = client.get_delivery(&delivery_id);
+    assert_eq!(
+        delivery.status, DeliveryStatus::Disputed,
+        "Delivery status should transition to Disputed after raising dispute"
+    );
+}
+
+#[test]
+fn test_cancel_disputed_delivery_rejected() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _escrow_id, _reputation_id) = setup_full(&env);
+
+    let metadata = get_test_metadata(&env, 2u64);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    client.raise_dispute(&recipient, &delivery_id);
+
+    let result = client.try_cancel_delivery(&shipper, &delivery_id);
+    match result {
+        Err(Ok(err)) => {
+            assert_eq!(err, FaniLabError::InvalidState.into());
+        }
+        _ => panic!("Expected FaniLabError::InvalidState when cancelling disputed delivery"),
+    }
+}
