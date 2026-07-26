@@ -107,6 +107,10 @@ pub mod events {
         Symbol::new(env, "driver_removed")
     }
 
+    pub fn fleet_deactivated(env: &Env) -> Symbol {
+        Symbol::new(env, "fleet_deactivated")
+    }
+
     // Dispute resolution events
     pub fn dispute_raised(env: &Env) -> Symbol {
         Symbol::new(env, "dispute_raised")
@@ -307,6 +311,15 @@ pub struct DriverRemovedEvent {
     pub fleet_id: u64,
     /// Driver address that was removed.
     pub driver: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetDeactivatedEvent {
+    /// Fleet identifier that was deactivated.
+    pub fleet_id: u64,
+    /// Address that authorized the deactivation (owner or admin).
+    pub caller: Address,
 }
 
 // ── Dispute resolution event payloads ────────────────────────────────────────

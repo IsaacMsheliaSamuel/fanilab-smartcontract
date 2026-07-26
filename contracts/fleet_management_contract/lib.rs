@@ -1,8 +1,9 @@
 #![no_std]
 
 use shared_types::{
-    events, ttl, DriverInvitedEvent, DriverRemovedEvent, FleetRegisteredEvent,
-    FleetTreasuryChangeProposedEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
+    events, ttl, DriverInvitedEvent, DriverRemovedEvent, FleetDeactivatedEvent,
+    FleetRegisteredEvent, FleetTreasuryChangeProposedEvent, FleetTreasuryUpdatedEvent,
+    InviteAcceptedEvent,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal,
@@ -34,6 +35,7 @@ pub enum FleetError {
     DriverAlreadyActive = 7,
     NoPendingTreasuryChange = 8,
     TimelockNotElapsed = 9,
+    FleetInactive = 10,
 }
 
 #[contracttype]
@@ -56,6 +58,10 @@ pub struct FleetProfile {
     pub total_active_drivers: u32,
     pub signers: soroban_sdk::Vec<Address>,
     pub signature_threshold: u32,
+    /// Whether the fleet is currently operating. Set to `false` by
+    /// `deactivate_fleet` (Issue #108); a deactivated fleet rejects new
+    /// driver invitations and no longer receives driver payouts.
+    pub active: bool,
 }
 
 /// A treasury change proposed by the fleet owner but not yet confirmed.
@@ -158,6 +164,7 @@ impl FleetManagementContract {
             total_active_drivers: 0,
             signers,
             signature_threshold: 1u32,
+            active: true,
         };
 
         let fleet_key = DataKey::Fleet(fleet_id);
@@ -209,6 +216,48 @@ impl FleetManagementContract {
             .persistent()
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound))
+    }
+
+    // ── Issue #108 — deactivate_fleet ─────────────────────────────────────────
+
+    /// Deactivate a fleet, marking it inactive (terminal, closable lifecycle
+    /// step). Callable by the fleet owner or the contract admin.
+    ///
+    /// Once deactivated, `add_driver_to_fleet` rejects new invitations and
+    /// `get_payout_address` falls back to routing payouts to the driver's own
+    /// address instead of the fleet treasury. Existing drivers are left in
+    /// place rather than auto-removed; they may be individually removed via
+    /// `remove_driver_from_fleet` if desired.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn deactivate_fleet(env: Env, caller: Address, fleet_id: FleetId) {
+        caller.require_auth();
+
+        let fleet_key = DataKey::Fleet(fleet_id);
+        let mut profile: FleetProfile = env
+            .storage()
+            .persistent()
+            .get(&fleet_key)
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
+        let is_admin = admin.map_or(false, |a| a == caller);
+
+        if profile.owner != caller && !is_admin {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+
+        profile.active = false;
+        env.storage().persistent().set(&fleet_key, &profile);
+        env.storage().persistent().extend_ttl(
+            &fleet_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        env.events().publish(
+            (events::fleet_deactivated(&env),),
+            FleetDeactivatedEvent { fleet_id, caller },
+        );
     }
 
     /// Update the treasury wallet for an existing fleet.
@@ -352,6 +401,10 @@ impl FleetManagementContract {
             .persistent()
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        if !profile.active {
+            panic_with_error!(&env, FleetError::FleetInactive);
+        }
 
         let mut is_authorized_signer = false;
         for i in 0..profile.signers.len() {
@@ -653,7 +706,11 @@ impl FleetManagementContract {
                     .persistent()
                     .get(&DataKey::Fleet(fleet_id))
                     .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
-                profile.treasury
+                if profile.active {
+                    profile.treasury
+                } else {
+                    driver
+                }
             }
             Some(DriverFleetStatus::Pending) | Some(DriverFleetStatus::Removed) | None => driver,
         }

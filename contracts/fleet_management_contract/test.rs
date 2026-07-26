@@ -1046,3 +1046,87 @@ fn test_escrow_payout_routes_through_fleet_treasury() {
     // This test verifies the integration point is correctly wired.
     // The actual payout routing through this address is tested in GitHub #12.
 }
+
+// ── Issue #108 tests — deactivate_fleet ───────────────────────────────────────
+
+#[test]
+fn test_owner_can_deactivate_fleet() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+
+    client.deactivate_fleet(&owner, &fleet_id);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.active, false);
+}
+
+#[test]
+fn test_admin_can_deactivate_fleet() {
+    let (env, client, admin) = setup_test();
+    let (fleet_id, _owner, _treasury) = register_fleet(&env, &client);
+
+    client.deactivate_fleet(&admin, &fleet_id);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.active, false);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_deactivate_fleet_rejects_unauthorized_caller() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, _owner, _treasury) = register_fleet(&env, &client);
+    let stranger = Address::generate(&env);
+
+    client.deactivate_fleet(&stranger, &fleet_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_deactivate_fleet_rejects_unknown_fleet() {
+    let (env, client, _admin) = setup_test();
+    let owner = Address::generate(&env);
+
+    client.deactivate_fleet(&owner, &999);
+}
+
+#[test]
+fn test_deactivate_fleet_emits_event() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+
+    client.deactivate_fleet(&owner, &fleet_id);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
+    assert_eq!(topic0, Symbol::new(&env, "fleet_deactivated"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_add_driver_to_fleet_rejects_invite_on_deactivated_fleet() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+    let driver = Address::generate(&env);
+
+    client.deactivate_fleet(&owner, &fleet_id);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+}
+
+#[test]
+fn test_get_payout_address_falls_back_to_driver_after_deactivation() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, treasury) = register_fleet(&env, &client);
+    let driver = Address::generate(&env);
+
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    client.accept_fleet_invite(&fleet_id, &driver);
+
+    // Active driver in an active fleet routes to the treasury.
+    assert_eq!(client.get_payout_address(&driver, &fleet_id), treasury);
+
+    // Once the fleet is deactivated, payouts fall back to the driver's own address.
+    client.deactivate_fleet(&owner, &fleet_id);
+    assert_eq!(client.get_payout_address(&driver, &fleet_id), driver);
+}
