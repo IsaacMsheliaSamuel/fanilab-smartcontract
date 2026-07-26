@@ -214,6 +214,12 @@ impl DisputeResolutionContract {
                 if current_time > delivered_at + dispute_limit {
                     panic_with_error!(&env, FaniLabError::InvalidState);
                 }
+                // Call delivery contract to transition to Disputed
+                let _: () = env.invoke_contract(
+                    &delivery_contract_addr,
+                    &Symbol::new(&env, "raise_dispute"),
+                    soroban_sdk::vec![&env, caller.into_val(&env), delivery_id.into_val(&env)],
+                );
             }
             DeliveryStatus::Active | DeliveryStatus::InTransit => {
                 // Call delivery contract to transition to Disputed and pause escrow

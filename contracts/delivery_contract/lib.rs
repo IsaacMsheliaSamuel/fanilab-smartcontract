@@ -43,6 +43,12 @@ mod constants {
 /// Validate whether a status transition is permitted by the delivery state machine.
 ///
 /// Allowed transitions:
+///   Pending   → Active, Cancelled
+///   Active    → InTransit, Disputed, Cancelled
+///   InTransit → Delivered, Disputed
+///   Delivered → Disputed
+///   Disputed  → Delivered (only via dispute resolution)
+///   Cancelled → (terminal, no transitions)
 ///   Pending   â†’ Active, Cancelled
 ///   Active    â†’ InTransit, Disputed, Cancelled
 ///   InTransit â†’ Delivered, Disputed
@@ -57,8 +63,8 @@ pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(
         (DeliveryStatus::Active, DeliveryStatus::Cancelled) => true,
         (DeliveryStatus::InTransit, DeliveryStatus::Delivered) => true,
         (DeliveryStatus::InTransit, DeliveryStatus::Disputed) => true,
+        (DeliveryStatus::Delivered, DeliveryStatus::Disputed) => true,
         (DeliveryStatus::Disputed, DeliveryStatus::Delivered) => true,
-        (DeliveryStatus::Disputed, DeliveryStatus::Cancelled) => true,
         _ => false,
     };
     if valid {
