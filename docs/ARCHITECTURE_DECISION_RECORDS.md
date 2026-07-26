@@ -44,7 +44,7 @@ Use Stellar Soroban smart contract platform.
 System could be single monolithic contract or multiple specialized contracts.
 
 ### Decision
-Use 7 specialized contracts with shared types library.
+Use 6 specialized contracts with a shared types library.
 
 ### Rationale
 - Separation of concerns
