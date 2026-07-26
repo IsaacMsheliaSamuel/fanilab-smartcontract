@@ -846,3 +846,93 @@ fn test_sweep_untracked_balance_unauthorized_rejected() {
         _ => panic!("Expected FaniLabError::Unauthorized"),
     }
 }
+
+#[test]
+fn test_volume_tier_fee_discount_applied() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &100); // 1% base fee
+    mint(&env, &token, &sender, 5000);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(EscrowContractClient::new(&env, &contract_id).VolumeTier {
+        volume_threshold: 2u32,
+        discount_bps: 50u32, // 0.5% discount for 2+ deliveries
+    });
+    client.set_volume_tiers(&tiers);
+
+    client.create_escrow(&sender, &recipient, &driver, &500u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &500u64);
+    assert_eq!(balance(&env, &token, &driver), 990); // (1000 - 10 fee)
+    assert_eq!(client.get_sender_volume(&sender), 1u32);
+
+    client.create_escrow(&sender, &recipient, &driver, &501u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &501u64);
+    assert_eq!(balance(&env, &token, &driver), 1985); // 990 + (1000 - 5 fee from 0.5% discount)
+    assert_eq!(client.get_sender_volume(&sender), 2u32);
+}
+
+#[test]
+fn test_sender_volume_tracking() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 5000);
+
+    assert_eq!(client.get_sender_volume(&sender), 0u32);
+
+    client.create_escrow(&sender, &recipient, &driver, &600u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &600u64);
+    assert_eq!(client.get_sender_volume(&sender), 1u32);
+
+    client.create_escrow(&sender, &recipient, &driver, &601u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &601u64);
+    assert_eq!(client.get_sender_volume(&sender), 2u32);
+
+    client.create_escrow(&sender, &recipient, &driver, &602u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &602u64);
+    assert_eq!(client.get_sender_volume(&sender), 3u32);
+}
+
+#[test]
+fn test_volume_tiers_configuration() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(EscrowContractClient::new(&env, &contract_id).VolumeTier {
+        volume_threshold: 10u32,
+        discount_bps: 100u32,
+    });
+    tiers.push_back(EscrowContractClient::new(&env, &contract_id).VolumeTier {
+        volume_threshold: 50u32,
+        discount_bps: 200u32,
+    });
+
+    client.set_volume_tiers(&tiers);
+
+    let retrieved_tiers = client.get_volume_tiers();
+    assert_eq!(retrieved_tiers.len(), 2u32);
+}

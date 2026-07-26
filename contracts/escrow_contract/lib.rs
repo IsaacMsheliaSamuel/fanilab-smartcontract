@@ -68,6 +68,25 @@ fn calculate_fee(amount: i128, platform_fee_bps: u32) -> i128 {
     amount.saturating_mul(platform_fee_bps as i128) / 10_000
 }
 
+fn get_effective_fee_bps(env: &Env, base_fee_bps: u32, sender_volume: u32) -> u32 {
+    let tiers: Option<soroban_sdk::Vec<VolumeTier>> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::VolumeTiers);
+
+    if let Some(tier_list) = tiers {
+        for i in (0..tier_list.len()).rev() {
+            if let Some(tier) = tier_list.get(i) {
+                if sender_volume >= tier.volume_threshold {
+                    return base_fee_bps.saturating_sub(tier.discount_bps);
+                }
+            }
+        }
+    }
+
+    base_fee_bps
+}
+
 fn get_settlement_contract(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::SettlementContract)
 }
@@ -172,6 +191,10 @@ enum DataKey {
     DisputeResolutionContract,
     /// Track total locked value per token
     TotalLocked(Address),
+    /// Track sender volume (number of completed deliveries)
+    SenderVolume(Address),
+    /// Store tier configuration (volume threshold -> discount bps)
+    VolumeTiers,
 }
 
 #[contracterror]
@@ -208,6 +231,13 @@ pub struct ProtocolInitialized {
 pub struct SettlementContractUpdated {
     pub old_address: Option<Address>,
     pub new_address: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeTier {
+    pub volume_threshold: u32,
+    pub discount_bps: u32,
 }
 
 #[contract]
@@ -703,14 +733,23 @@ impl EscrowContract {
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
-        let platform_fee_bps: u32 = env
+
+        let base_fee_bps: u32 = env
             .storage()
             .instance()
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
             .map(|config| config.platform_fee_bps)
             .unwrap_or(0);
-        let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+
+        let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
+        let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
+        let platform_fee = calculate_fee(record.amount, effective_fee_bps);
         let driver_amount = record.amount.saturating_sub(platform_fee);
+
+        let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
+        env.storage()
+            .persistent()
+            .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
         let fleet_management = get_fleet_management_contract(&env);
         payout_driver(
@@ -841,14 +880,22 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
         if release_to_driver {
-            let platform_fee_bps: u32 = env
+            let base_fee_bps: u32 = env
                 .storage()
                 .instance()
                 .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
                 .map(|config| config.platform_fee_bps)
                 .unwrap_or(0);
-            let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+
+            let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
+            let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
+            let platform_fee = calculate_fee(record.amount, effective_fee_bps);
             let driver_amount = record.amount.saturating_sub(platform_fee);
+
+            let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
+            env.storage()
+                .persistent()
+                .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
             let fleet_management = get_fleet_management_contract(&env);
             payout_driver(
@@ -988,14 +1035,22 @@ impl EscrowContract {
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
-        let platform_fee_bps: u32 = env
+        let base_fee_bps: u32 = env
             .storage()
             .instance()
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
             .map(|config| config.platform_fee_bps)
             .unwrap_or(0);
-        let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+
+        let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
+        let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
+        let platform_fee = calculate_fee(record.amount, effective_fee_bps);
         let driver_amount = record.amount.saturating_sub(platform_fee);
+
+        let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
+        env.storage()
+            .persistent()
+            .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
         payout_driver(&env, &record.token, &record.driver, driver_amount);
 
@@ -1165,6 +1220,34 @@ impl EscrowContract {
             (Symbol::new(&env, "untracked_balance_swept"),),
             (token, untracked_balance, recipient),
         );
+    }
+
+    pub fn set_volume_tiers(env: Env, admin: Address, tiers: soroban_sdk::Vec<VolumeTier>) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VolumeTiers, &tiers);
+        env.events().publish(
+            (Symbol::new(&env, "volume_tiers_updated"),),
+            (admin, tiers.len()),
+        );
+    }
+
+    pub fn get_volume_tiers(env: Env) -> soroban_sdk::Vec<VolumeTier> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VolumeTiers)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    pub fn get_sender_volume(env: Env, sender: Address) -> u32 {
+        let key = DataKey::SenderVolume(sender);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0)
     }
 }
 
