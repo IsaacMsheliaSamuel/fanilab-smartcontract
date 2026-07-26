@@ -954,3 +954,178 @@ fn test_resolve_dispute_emits_driver_and_amount_in_event() {
     assert_eq!(record.driver, driver);
     assert_eq!(balance(&env, &token, &driver), 900);
 }
+
+// ── Issue #87: Reentrancy and state-update-before-transfer tests ────────────
+
+#[test]
+fn test_release_escrow_updates_state_before_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &500u64, &token, &2000, &None);
+    client.release_escrow(&recipient, &500u64);
+
+    let record = client.get_escrow(&500u64);
+    assert_eq!(record.status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 2000);
+}
+
+#[test]
+fn test_refund_escrow_updates_state_before_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &501u64, &token, &2000, &None);
+    client.refund_escrow(&sender, &501u64);
+
+    let record = client.get_escrow(&501u64);
+    assert_eq!(record.status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 2000);
+}
+
+#[test]
+fn test_resolve_dispute_updates_state_before_release_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &502u64, &token, &2000, &None);
+    client.raise_dispute(&sender, &502u64);
+    client.resolve_dispute(&admin, &502u64, &true);
+
+    let record = client.get_escrow(&502u64);
+    assert_eq!(record.status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 2000);
+}
+
+#[test]
+fn test_resolve_dispute_updates_state_before_refund_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &503u64, &token, &2000, &None);
+    client.raise_dispute(&sender, &503u64);
+    client.resolve_dispute(&admin, &503u64, &false);
+
+    let record = client.get_escrow(&503u64);
+    assert_eq!(record.status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 2000);
+}
+
+#[test]
+fn test_resolve_dispute_split_updates_state_before_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &504u64, &token, &2000, &None);
+    client.raise_dispute(&sender, &504u64);
+    client.resolve_dispute_split(&admin, &504u64, &3000);
+
+    let record = client.get_escrow(&504u64);
+    assert_eq!(record.status, EscrowStatus::Split);
+    assert_eq!(balance(&env, &token, &sender), 600);
+    assert_eq!(balance(&env, &token, &driver), 1400);
+}
+
+#[test]
+fn test_double_release_prevented_by_state_check() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &505u64, &token, &2000, &None);
+    client.release_escrow(&recipient, &505u64);
+
+    let result = client.try_release_escrow(&admin, &505u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
+        _ => panic!("Expected EscrowError::InvalidState on double-release attempt"),
+    }
+
+    assert_eq!(balance(&env, &token, &driver), 2000);
+}
+
+#[test]
+fn test_cannot_release_already_refunded_escrow() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &506u64, &token, &2000, &None);
+    client.refund_escrow(&sender, &506u64);
+
+    let result = client.try_release_escrow(&admin, &506u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
+        _ => panic!("Expected EscrowError::InvalidState"),
+    }
+
+    assert_eq!(balance(&env, &token, &sender), 2000);
+}
