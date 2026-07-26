@@ -631,6 +631,34 @@ fn test_get_payout_address_returns_driver_after_removal() {
     assert_eq!(payout, driver);
 }
 
+// ── Issue #110 tests — set_identity_contract coverage ─────────────────────────
+
+#[test]
+fn test_set_identity_contract_admin_success() {
+    let (env, client, admin) = setup_test();
+
+    let identity_id = env.register(IdentityReputationContract, ());
+    client.set_identity_contract(&admin, &identity_id);
+
+    let stored: Address = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::IdentityContract)
+            .unwrap()
+    });
+    assert_eq!(stored, identity_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_set_identity_contract_unauthorized_caller_panics() {
+    let (env, client, _admin) = setup_test();
+
+    let identity_id = env.register(IdentityReputationContract, ());
+    let not_admin = Address::generate(&env);
+    client.set_identity_contract(&not_admin, &identity_id);
+}
+
 // ── Issue #73 tests — register_fleet with identity contract ──────────────────
 
 #[test]
