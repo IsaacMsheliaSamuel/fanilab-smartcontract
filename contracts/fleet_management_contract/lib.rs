@@ -403,6 +403,52 @@ impl FleetManagementContract {
         );
     }
 
+    // ── Issue #109 — cancel_invite ─────────────────────────────────────────────
+
+    /// Cancel a driver's pending invite before it has been accepted.  Only an
+    /// authorized signer may call this — the same authority required to issue
+    /// the invite via `add_driver_to_fleet`.
+    ///
+    /// Unlike `remove_driver_from_fleet` (bilateral severance of an already
+    /// active relationship), this withdraws an invite the driver never
+    /// accepted, clearing the slot so the driver can be re-invited immediately.
+    pub fn cancel_invite(env: Env, owner: Address, fleet_id: FleetId, driver: Address) {
+        owner.require_auth();
+
+        let profile: FleetProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Fleet(fleet_id))
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        let mut is_authorized_signer = false;
+        for i in 0..profile.signers.len() {
+            if let Some(signer) = profile.signers.get(i) {
+                if signer == owner {
+                    is_authorized_signer = true;
+                    break;
+                }
+            }
+        }
+
+        if !is_authorized_signer {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+
+        let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
+        let status: DriverFleetStatus = env
+            .storage()
+            .persistent()
+            .get(&invite_key)
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::InviteNotFound));
+
+        if status != DriverFleetStatus::Pending {
+            panic_with_error!(&env, FleetError::DriverAlreadyActive);
+        }
+
+        env.storage().persistent().remove(&invite_key);
+    }
+
     // ── Issue #69 — accept_fleet_invite ───────────────────────────────────────
 
     /// Accept a pending fleet invite.  The driver themselves must sign this

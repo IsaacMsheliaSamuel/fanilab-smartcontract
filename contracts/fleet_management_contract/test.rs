@@ -269,6 +269,61 @@ fn test_add_driver_to_unknown_fleet_panics() {
     client.add_driver_to_fleet(&caller, &999, &driver);
 }
 
+// ── Issue #109 tests — cancel_invite ──────────────────────────────────────────
+
+#[test]
+fn test_cancel_invite_allows_immediate_reinvite() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    client.cancel_invite(&owner, &fleet_id, &driver);
+
+    assert_eq!(client.get_driver_fleet_status(&fleet_id, &driver), None);
+
+    // Re-inviting immediately afterward must succeed (no DriverAlreadyInvited panic).
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    let status = client.get_driver_fleet_status(&fleet_id, &driver);
+    assert_eq!(status, Some(DriverFleetStatus::Pending));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_cancel_invite_non_signer_is_rejected() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+
+    let attacker = Address::generate(&env);
+    client.cancel_invite(&attacker, &fleet_id, &driver);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_cancel_invite_with_no_invite_panics() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+
+    let driver = Address::generate(&env);
+    client.cancel_invite(&owner, &fleet_id, &driver);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_cancel_invite_on_active_driver_panics() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    client.accept_fleet_invite(&fleet_id, &driver);
+
+    client.cancel_invite(&owner, &fleet_id, &driver);
+}
+
 // Issue #74 — Fleet Owner Authorization ─────────────────────────────────────
 
 #[test]
