@@ -1136,6 +1136,36 @@ impl EscrowContract {
             .get(&key)
             .unwrap_or(0)
     }
+
+    pub fn sweep_untracked_balance(
+        env: Env,
+        admin: Address,
+        token: Address,
+        recipient: Address,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let contract_balance =
+            token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let total_locked = Self::get_total_locked(env.clone(), token.clone());
+
+        if contract_balance <= total_locked {
+            return;
+        }
+
+        let untracked_balance = contract_balance.saturating_sub(total_locked);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &untracked_balance,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "untracked_balance_swept"),),
+            (token, untracked_balance, recipient),
+        );
+    }
 }
 
 #[cfg(test)]

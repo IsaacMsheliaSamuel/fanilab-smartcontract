@@ -770,3 +770,79 @@ fn test_total_locked_decreases_on_dispute_split() {
     client.resolve_dispute_split(&admin, &305u64, &5000);
     assert_eq!(client.get_total_locked(&token), 0);
 }
+
+#[test]
+fn test_sweep_untracked_balance_recovers_mistaken_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let recovery_address = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    client.create_escrow(&sender, &recipient, &driver, &400u64, &token, &1000, &None);
+    assert_eq!(client.get_total_locked(&token), 1000);
+
+    mint(&env, &token, &env.current_contract_address(), &1000);
+    assert_eq!(balance(&env, &token, &contract_id), 2000);
+
+    client.sweep_untracked_balance(&admin, &token, &recovery_address);
+
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+    assert_eq!(balance(&env, &token, &recovery_address), 1000);
+    assert_eq!(client.get_total_locked(&token), 1000);
+}
+
+#[test]
+fn test_sweep_untracked_balance_with_empty_untracked() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let recovery_address = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &401u64, &token, &1000, &None);
+    assert_eq!(client.get_total_locked(&token), 1000);
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+
+    client.sweep_untracked_balance(&admin, &token, &recovery_address);
+
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+    assert_eq!(balance(&env, &token, &recovery_address), 0);
+    assert_eq!(client.get_total_locked(&token), 1000);
+}
+
+#[test]
+fn test_sweep_untracked_balance_unauthorized_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let recovery_address = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+
+    let result = client.try_sweep_untracked_balance(&attacker, &token, &recovery_address);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+}
