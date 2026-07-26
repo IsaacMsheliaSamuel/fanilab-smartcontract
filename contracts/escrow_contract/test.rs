@@ -653,13 +653,120 @@ fn test_cannot_reclaim_released_escrow() {
     match result {
         Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
         _ => panic!("Expected EscrowError::InvalidState"),
-    client.set_dispute_resolution_contract(&admin, &dispute_contract);
-    mint(&env, &token, &sender, 1000);
-    client.create_escrow(&sender, &recipient, &driver, &11u64, &token, &1000);
-
-    let result = client.try_freeze_funds(&attacker, &11u64);
-    match result {
-        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
-        _ => panic!("Expected FaniLabError::Unauthorized"),
     }
+}
+
+#[test]
+fn test_total_locked_increases_on_create_escrow() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 3000);
+
+    assert_eq!(client.get_total_locked(&token), 0);
+    client.create_escrow(&sender, &recipient, &driver, &300u64, &token, &1000, &None);
+    assert_eq!(client.get_total_locked(&token), 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &301u64, &token, &2000, &None);
+    assert_eq!(client.get_total_locked(&token), 3000);
+}
+
+#[test]
+fn test_total_locked_decreases_on_release_escrow() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &302u64, &token, &1000, &None);
+    assert_eq!(client.get_total_locked(&token), 1000);
+
+    client.release_escrow(&recipient, &302u64);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_total_locked_decreases_on_refund_escrow() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &303u64, &token, &1000, &None);
+    assert_eq!(client.get_total_locked(&token), 1000);
+
+    client.refund_escrow(&sender, &303u64);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_total_locked_decreases_on_dispute_resolve() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &304u64, &token, &1000, &None);
+    assert_eq!(client.get_total_locked(&token), 1000);
+
+    client.raise_dispute(&recipient, &304u64);
+    assert_eq!(client.get_total_locked(&token), 1000);
+
+    client.resolve_dispute(&admin, &304u64, &false);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_total_locked_decreases_on_dispute_split() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &305u64, &token, &1000, &None);
+    assert_eq!(client.get_total_locked(&token), 1000);
+
+    client.raise_dispute(&recipient, &305u64);
+    client.resolve_dispute_split(&admin, &305u64, &5000);
+    assert_eq!(client.get_total_locked(&token), 0);
 }

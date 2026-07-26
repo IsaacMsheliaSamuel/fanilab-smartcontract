@@ -170,6 +170,8 @@ enum DataKey {
     Paused,
     FleetManagementContract,
     DisputeResolutionContract,
+    /// Track total locked value per token
+    TotalLocked(Address),
 }
 
 #[contracterror]
@@ -525,6 +527,17 @@ impl EscrowContract {
             constants::ESCROW_TTL_EXTEND_TO,
         );
 
+        let token_for_tracking = record_token_clone.clone();
+        let total_locked_key = DataKey::TotalLocked(token_for_tracking.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_add(amount));
+
         env.events().publish(
             (events::escrow_funded(&env),),
             shared_types::EscrowFundedEvent {
@@ -724,6 +737,17 @@ impl EscrowContract {
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_released(&env),),
             shared_types::EscrowReleasedEvent {
@@ -763,6 +787,17 @@ impl EscrowContract {
         );
         record.status = EscrowStatus::Refunded;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_refunded(&env),),
             shared_types::EscrowRefundedEvent {
@@ -855,6 +890,16 @@ impl EscrowContract {
 
         save_escrow(&env, delivery_id, &record);
 
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::dispute_resolved(&env),),
             shared_types::DisputeResolvedEvent {
@@ -906,6 +951,16 @@ impl EscrowContract {
 
         record.status = EscrowStatus::Split;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
 
         env.events().publish(
             (events::dispute_resolved(&env),),
@@ -959,6 +1014,17 @@ impl EscrowContract {
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_released(&env), delivery_id),
             (record.driver, driver_amount, platform_fee),
@@ -1019,6 +1085,17 @@ impl EscrowContract {
         );
         record.status = EscrowStatus::Refunded;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_refunded(&env), delivery_id),
             (record.sender, record.amount),
@@ -1050,6 +1127,14 @@ impl EscrowContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    pub fn get_total_locked(env: Env, token: Address) -> i128 {
+        let key = DataKey::TotalLocked(token);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0)
     }
 }
 
