@@ -663,3 +663,90 @@ fn test_cannot_reclaim_released_escrow() {
         _ => panic!("Expected FaniLabError::Unauthorized"),
     }
 }
+
+// ── Issue #90: clear_settlement_contract tests ──────────────────────────────
+
+#[test]
+fn test_clear_settlement_contract_reverts_to_none() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_settlement_contract(&admin, &settlement_contract);
+    assert_eq!(client.get_settlement_contract(), Some(settlement_contract));
+
+    client.clear_settlement_contract(&admin);
+    assert_eq!(client.get_settlement_contract(), None);
+}
+
+#[test]
+fn test_clear_settlement_contract_non_admin_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_settlement_contract(&admin, &settlement_contract);
+
+    let result = client.try_clear_settlement_contract(&attacker);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+}
+
+#[test]
+fn test_clear_settlement_contract_reverts_payout_to_direct_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.update_platform_fee(&admin, &500); // 5%
+    mint(&env, &token, &sender, 1000);
+
+    client.set_settlement_contract(&admin, &settlement_contract);
+    client.create_escrow(&sender, &recipient, &driver, &300u64, &token, &1000, &None);
+
+    client.clear_settlement_contract(&admin);
+    assert_eq!(client.get_settlement_contract(), None);
+
+    client.release_escrow(&recipient, &300u64);
+
+    assert_eq!(balance(&env, &token, &driver), 950);
+    assert_eq!(balance(&env, &token, &admin), 50);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+}
+
+#[test]
+fn test_clear_nonexistent_settlement_contract_succeeds() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    assert_eq!(client.get_settlement_contract(), None);
+
+    client.clear_settlement_contract(&admin);
+    assert_eq!(client.get_settlement_contract(), None);
+}
