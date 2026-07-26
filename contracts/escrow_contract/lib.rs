@@ -67,6 +67,25 @@ fn calculate_fee(amount: i128, platform_fee_bps: u32) -> i128 {
     amount.saturating_mul(platform_fee_bps as i128) / 10_000
 }
 
+fn get_effective_fee_bps(env: &Env, base_fee_bps: u32, sender_volume: u32) -> u32 {
+    let tiers: Option<soroban_sdk::Vec<VolumeTier>> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::VolumeTiers);
+
+    if let Some(tier_list) = tiers {
+        for i in (0..tier_list.len()).rev() {
+            if let Some(tier) = tier_list.get(i) {
+                if sender_volume >= tier.volume_threshold {
+                    return base_fee_bps.saturating_sub(tier.discount_bps);
+                }
+            }
+        }
+    }
+
+    base_fee_bps
+}
+
 fn get_settlement_contract(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::SettlementContract)
 }
@@ -206,6 +225,12 @@ enum DataKey {
     Paused,
     FleetManagementContract,
     DisputeResolutionContract,
+    /// Track total locked value per token
+    TotalLocked(Address),
+    /// Track sender volume (number of completed deliveries)
+    SenderVolume(Address),
+    /// Store tier configuration (volume threshold -> discount bps)
+    VolumeTiers,
 }
 
 #[contracterror]
@@ -242,6 +267,13 @@ pub struct ProtocolInitialized {
 pub struct SettlementContractUpdated {
     pub old_address: Option<Address>,
     pub new_address: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeTier {
+    pub volume_threshold: u32,
+    pub discount_bps: u32,
 }
 
 #[contract]
@@ -567,6 +599,17 @@ impl EscrowContract {
             constants::ESCROW_TTL_EXTEND_TO,
         );
 
+        let token_for_tracking = record_token_clone.clone();
+        let total_locked_key = DataKey::TotalLocked(token_for_tracking.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_add(amount));
+
         env.events().publish(
             (events::escrow_funded(&env),),
             shared_types::EscrowFundedEvent {
@@ -736,20 +779,40 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
 
+        let base_fee_bps: u32 = env
         let platform_fee_bps: u32 = env
             .storage()
             .instance()
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
             .map(|config| config.platform_fee_bps)
             .unwrap_or(0);
-        let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+
+        let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
+        let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
+        let platform_fee = calculate_fee(record.amount, effective_fee_bps);
         let driver_amount = record.amount.saturating_sub(platform_fee);
+
+        let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
+        env.storage()
+            .persistent()
+            .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
         let fleet_management = get_fleet_management_contract(&env);
         settle_escrow_funds(&env, &record, fleet_management);
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_released(&env),),
             shared_types::EscrowReleasedEvent {
@@ -790,6 +853,17 @@ impl EscrowContract {
         );
         record.status = EscrowStatus::Refunded;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_refunded(&env),),
             shared_types::EscrowRefundedEvent {
@@ -835,6 +909,23 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
         if release_to_driver {
+            let base_fee_bps: u32 = env
+                .storage()
+                .instance()
+                .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
+                .map(|config| config.platform_fee_bps)
+                .unwrap_or(0);
+
+            let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
+            let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
+            let platform_fee = calculate_fee(record.amount, effective_fee_bps);
+            let driver_amount = record.amount.saturating_sub(platform_fee);
+
+            let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
+            env.storage()
+                .persistent()
+                .set(&sender_volume_key, &sender_volume.saturating_add(1));
+
             let fleet_management = get_fleet_management_contract(&env);
             settle_escrow_funds(&env, &record, fleet_management);
             record.status = EscrowStatus::Released;
@@ -853,6 +944,16 @@ impl EscrowContract {
         }
 
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
 
         env.events().publish(
             (events::dispute_resolved(&env),),
@@ -907,6 +1008,16 @@ impl EscrowContract {
         record.status = EscrowStatus::Split;
         save_escrow(&env, delivery_id, &record);
 
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::dispute_resolved(&env),),
             shared_types::DisputeResolvedEvent {
@@ -934,6 +1045,7 @@ impl EscrowContract {
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
+        let base_fee_bps: u32 = env
 
         let platform_fee_bps: u32 = env
             .storage()
@@ -941,14 +1053,47 @@ impl EscrowContract {
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
             .map(|config| config.platform_fee_bps)
             .unwrap_or(0);
-        let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+
+        let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
+        let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
+        let platform_fee = calculate_fee(record.amount, effective_fee_bps);
         let driver_amount = record.amount.saturating_sub(platform_fee);
 
+        let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
+        env.storage()
+            .persistent()
+            .set(&sender_volume_key, &sender_volume.saturating_add(1));
+
+        payout_driver(&env, &record.token, &record.driver, driver_amount);
+
+        if platform_fee > 0 {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&StorageKey::Admin)
+                .expect("Not initialized");
+            token::Client::new(&env, &record.token).transfer(
+                &env.current_contract_address(),
+                &admin,
+                &platform_fee,
+            );
+        }
         let fleet_management = get_fleet_management_contract(&env);
         settle_escrow_funds(&env, &record, fleet_management);
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_released(&env), delivery_id),
             (record.driver, driver_amount, platform_fee),
@@ -1011,6 +1156,17 @@ impl EscrowContract {
         );
         record.status = EscrowStatus::Refunded;
         save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+
         env.events().publish(
             (events::escrow_refunded(&env), delivery_id),
             (record.sender, record.amount),
@@ -1042,6 +1198,72 @@ impl EscrowContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    pub fn get_total_locked(env: Env, token: Address) -> i128 {
+        let key = DataKey::TotalLocked(token);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0)
+    }
+
+    pub fn sweep_untracked_balance(
+        env: Env,
+        admin: Address,
+        token: Address,
+        recipient: Address,
+    ) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let contract_balance =
+            token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let total_locked = Self::get_total_locked(env.clone(), token.clone());
+
+        if contract_balance <= total_locked {
+            return;
+        }
+
+        let untracked_balance = contract_balance.saturating_sub(total_locked);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &untracked_balance,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "untracked_balance_swept"),),
+            (token, untracked_balance, recipient),
+        );
+    }
+
+    pub fn set_volume_tiers(env: Env, admin: Address, tiers: soroban_sdk::Vec<VolumeTier>) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VolumeTiers, &tiers);
+        env.events().publish(
+            (Symbol::new(&env, "volume_tiers_updated"),),
+            (admin, tiers.len()),
+        );
+    }
+
+    pub fn get_volume_tiers(env: Env) -> soroban_sdk::Vec<VolumeTier> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VolumeTiers)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    pub fn get_sender_volume(env: Env, sender: Address) -> u32 {
+        let key = DataKey::SenderVolume(sender);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0)
     }
 }
 

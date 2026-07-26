@@ -734,6 +734,184 @@ fn test_get_payout_address_multiple_drivers_same_fleet() {
     assert_eq!(client.get_payout_address(&driver_c, &fleet_id), driver_c);
 }
 
+// ── Issue #71 multi-signature tests ───────────────────────────────────────────
+
+#[test]
+fn test_single_owner_fleet_is_backward_compatible() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.signers.len(), 1u32);
+    assert_eq!(profile.signature_threshold, 1u32);
+
+    let (signers, threshold) = client.get_fleet_signers(&fleet_id);
+    assert_eq!(signers.len(), 1u32);
+    assert_eq!(threshold, 1u32);
+}
+
+#[test]
+fn test_configure_signers_adds_multiple_signers() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let signer2 = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+
+    let mut new_signers = soroban_sdk::Vec::new(&env);
+    new_signers.push_back(owner.clone());
+    new_signers.push_back(signer2.clone());
+    new_signers.push_back(signer3.clone());
+
+    client.configure_signers(&owner, &fleet_id, &new_signers, &2u32);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.signers.len(), 3u32);
+    assert_eq!(profile.signature_threshold, 2u32);
+}
+
+#[test]
+fn test_configure_signers_unauthorized_not_owner() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let attacker = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+
+    let mut new_signers = soroban_sdk::Vec::new(&env);
+    new_signers.push_back(owner.clone());
+    new_signers.push_back(signer2.clone());
+
+    let result = client.try_configure_signers(&attacker, &fleet_id, &new_signers, &2u32);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::Unauthorized.into()),
+        _ => panic!("Expected FleetError::Unauthorized"),
+    }
+}
+
+#[test]
+fn test_update_fleet_treasury_with_authorized_signer() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let new_treasury = Address::generate(&env);
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.treasury, new_treasury);
+}
+
+#[test]
+fn test_update_fleet_treasury_unauthorized_not_signer() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let attacker = Address::generate(&env);
+    let new_treasury = Address::generate(&env);
+
+    let result = client.try_update_fleet_treasury(&attacker, &fleet_id, &new_treasury);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::Unauthorized.into()),
+        _ => panic!("Expected FleetError::Unauthorized"),
+    }
+}
+
+#[test]
+fn test_add_driver_authorized_signer_allowed() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let signer2 = Address::generate(&env);
+    let mut new_signers = soroban_sdk::Vec::new(&env);
+    new_signers.push_back(owner.clone());
+    new_signers.push_back(signer2.clone());
+
+    client.configure_signers(&owner, &fleet_id, &new_signers, &1u32);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&signer2, &fleet_id, &driver);
+
+    let status = client.get_driver_fleet_status(&fleet_id, &driver);
+    assert_eq!(status, Some(DriverFleetStatus::Pending));
+}
+
+#[test]
+fn test_add_driver_unauthorized_not_signer() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let attacker = Address::generate(&env);
+    let driver = Address::generate(&env);
+
+    let result = client.try_add_driver_to_fleet(&attacker, &fleet_id, &driver);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::Unauthorized.into()),
+        _ => panic!("Expected FleetError::Unauthorized"),
+    }
+}
+
+#[test]
+fn test_remove_driver_by_authorized_signer() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let signer2 = Address::generate(&env);
+    let mut new_signers = soroban_sdk::Vec::new(&env);
+    new_signers.push_back(owner.clone());
+    new_signers.push_back(signer2.clone());
+
+    client.configure_signers(&owner, &fleet_id, &new_signers, &1u32);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    client.accept_fleet_invite(&fleet_id, &driver);
+
+    client.remove_driver_from_fleet(&fleet_id, &signer2, &driver);
+
+    let status = client.get_driver_fleet_status(&fleet_id, &driver);
+    assert_eq!(status, None);
+}
+
+#[test]
+fn test_remove_driver_not_signer_but_is_driver() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    client.accept_fleet_invite(&fleet_id, &driver);
+
+    client.remove_driver_from_fleet(&fleet_id, &driver, &driver);
+
+    let status = client.get_driver_fleet_status(&fleet_id, &driver);
+    assert_eq!(status, None);
 // ── Cross-contract integration tests ──────────────────────────────────────────
 
 #[test]
