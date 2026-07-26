@@ -446,3 +446,63 @@ fn test_init_already_initialized_rejected() {
         _ => panic!("Expected AlreadyInitialized error"),
     }
 }
+
+// Issue #107: previously-untested public functions
+
+#[test]
+fn test_get_admin_returns_configured_admin() {
+    let (_env, admin, client, _, _) = setup();
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_set_and_is_authorized_contract_roundtrip() {
+    let (env, admin, client, _, _) = setup();
+    let contract_addr = Address::generate(&env);
+
+    assert_eq!(client.is_authorized_contract(&contract_addr), false);
+
+    client.set_authorized_contract(&admin, &contract_addr, &true);
+    assert_eq!(client.is_authorized_contract(&contract_addr), true);
+
+    client.set_authorized_contract(&admin, &contract_addr, &false);
+    assert_eq!(client.is_authorized_contract(&contract_addr), false);
+}
+
+#[test]
+fn test_is_eligible_for_enterprise_below_threshold() {
+    let (env, _, client, _, _) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
+    // Freshly registered drivers start at 50, below the 75 threshold.
+    assert_eq!(client.is_eligible_for_enterprise(&driver), false);
+}
+
+#[test]
+fn test_is_eligible_for_enterprise_at_threshold() {
+    let (env, _, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
+    for _ in 0..5 {
+        client.increase_reputation(&delivery_contract, &driver, &1u64, &1000u32, &false);
+    }
+    let profile = client.get_driver_profile(&driver);
+    assert_eq!(profile.reputation_score, 75);
+    assert_eq!(client.is_eligible_for_enterprise(&driver), true);
+}
+
+#[test]
+fn test_is_eligible_for_enterprise_above_threshold() {
+    let (env, _, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
+    for _ in 0..6 {
+        client.increase_reputation(&delivery_contract, &driver, &1u64, &1000u32, &false);
+    }
+    let profile = client.get_driver_profile(&driver);
+    assert!(profile.reputation_score > 75);
+    assert_eq!(client.is_eligible_for_enterprise(&driver), true);
+}
