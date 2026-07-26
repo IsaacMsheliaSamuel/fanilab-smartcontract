@@ -848,3 +848,109 @@ fn test_accept_admin_completes_transfer() {
 
     assert_eq!(client.get_admin(), new_admin);
 }
+
+// ── Issue #88: resolve_dispute event emission tests ──────────────────────────
+
+#[test]
+fn test_resolve_dispute_release_emits_escrow_released_event() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    client.update_platform_fee(&admin, &500); // 5%
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &400u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &400u64);
+
+    client.resolve_dispute(&admin, &400u64, &true);
+
+    let record = client.get_escrow(&400u64);
+    assert_eq!(record.status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 950);
+    assert_eq!(balance(&env, &token, &admin), 50);
+}
+
+#[test]
+fn test_resolve_dispute_refund_emits_escrow_refunded_event() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &401u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &401u64);
+
+    client.resolve_dispute(&admin, &401u64, &false);
+
+    let record = client.get_escrow(&401u64);
+    assert_eq!(record.status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 1000);
+}
+
+#[test]
+fn test_resolve_dispute_split_emits_event_with_both_amounts() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &402u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &402u64);
+
+    client.resolve_dispute_split(&admin, &402u64, &5000);
+
+    let record = client.get_escrow(&402u64);
+    assert_eq!(record.status, EscrowStatus::Split);
+    assert_eq!(balance(&env, &token, &sender), 500);
+    assert_eq!(balance(&env, &token, &driver), 500);
+}
+
+#[test]
+fn test_resolve_dispute_emits_driver_and_amount_in_event() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    client.update_platform_fee(&admin, &1000); // 10%
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &403u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &403u64);
+
+    client.resolve_dispute(&admin, &403u64, &true);
+
+    let record = client.get_escrow(&403u64);
+    assert_eq!(record.driver, driver);
+    assert_eq!(balance(&env, &token, &driver), 900);
+}
