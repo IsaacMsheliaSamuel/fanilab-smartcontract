@@ -43,6 +43,8 @@ pub enum DriverFleetStatus {
     Pending,
     /// Driver has accepted and is an active member of the fleet.
     Active,
+    /// Driver has been removed from the fleet (terminal state, historical record preserved).
+    Removed,
 }
 
 #[contracttype]
@@ -335,6 +337,7 @@ impl FleetManagementContract {
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
 
         // Guard: do not overwrite an existing invite or active membership.
+        // Removed drivers may be re-invited.
         if env.storage().persistent().has(&invite_key) {
             let existing: DriverFleetStatus = env.storage().persistent().get(&invite_key).unwrap();
             match existing {
@@ -343,6 +346,9 @@ impl FleetManagementContract {
                 }
                 DriverFleetStatus::Active => {
                     panic_with_error!(&env, FleetError::DriverAlreadyActive)
+                }
+                DriverFleetStatus::Removed => {
+                    // Allow re-inviting a previously removed driver.
                 }
             }
         }
@@ -497,8 +503,13 @@ impl FleetManagementContract {
             env.storage().persistent().set(&fleet_key, &profile);
         }
 
-        // Remove the driver's fleet record.
-        env.storage().persistent().remove(&invite_key);
+        // Transition to Removed terminal state instead of deleting, preserving historical record.
+        env.storage()
+            .persistent()
+            .set(&invite_key, &DriverFleetStatus::Removed);
+        env.storage()
+            .persistent()
+            .extend_ttl(&invite_key, 518400, 518400);
 
         // Remove driver from fleet roster.
         let roster_key = DataKey::FleetRoster(fleet_id);
@@ -556,7 +567,7 @@ impl FleetManagementContract {
                     .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
                 profile.treasury
             }
-            _ => driver,
+            Some(DriverFleetStatus::Pending) | Some(DriverFleetStatus::Removed) | None => driver,
         }
     }
 
