@@ -148,6 +148,20 @@ impl DeliveryContract {
         validate_delivery_metadata(&env, &metadata)
             .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
 
+        if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
+            use soroban_sdk::IntoVal;
+            let _: Result<(), _> = env.invoke_contract(
+                &identity_contract,
+                &Symbol::new(&env, "register_user"),
+                soroban_sdk::vec![&env, sender.clone().into_val(&env)],
+            );
+            let _: Result<(), _> = env.invoke_contract(
+                &identity_contract,
+                &Symbol::new(&env, "register_user"),
+                soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
+            );
+        }
+
         let mut counter: u64 = env
             .storage()
             .persistent()
@@ -239,6 +253,20 @@ impl DeliveryContract {
 
         if metadata_list.len() > MAX_BATCH_SIZE as u32 {
             panic!("BatchTooLarge");
+        }
+
+        if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
+            use soroban_sdk::IntoVal;
+            let _: Result<(), _> = env.invoke_contract(
+                &identity_contract,
+                &Symbol::new(&env, "register_user"),
+                soroban_sdk::vec![&env, sender.clone().into_val(&env)],
+            );
+            let _: Result<(), _> = env.invoke_contract(
+                &identity_contract,
+                &Symbol::new(&env, "register_user"),
+                soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
+            );
         }
 
         let mut result = soroban_sdk::Vec::new(&env);

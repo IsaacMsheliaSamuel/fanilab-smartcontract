@@ -59,6 +59,12 @@ pub struct MockReputationContract;
 
 #[contractimpl]
 impl MockReputationContract {
+    pub fn register_user(_env: Env, user: Address) {
+        _env.storage()
+            .temporary()
+            .set(&Symbol::new(&_env, "registered_user"), &user);
+    }
+
     pub fn increase_reputation(
         _env: Env,
         _caller: Address,
@@ -762,6 +768,25 @@ fn test_confirm_delivery_calls_increase_reputation() {
     );
 }
 
+// ── User Registration Tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_create_delivery_registers_sender_and_recipient() {
+    let env = Env::default();
+    let (client, shipper, _driver, recipient, _escrow_id, reputation_id) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+
+    let _delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    let last_registered: Address = env.as_contract(&reputation_id, || {
+        env.storage()
+            .temporary()
+            .get(&Symbol::new(&env, "registered_user"))
+            .unwrap_or(shipper.clone())
+    });
+    assert_eq!(
+        last_registered, recipient,
+        "Expected recipient to be registered after create_delivery"
 #[test]
 fn test_raise_dispute_on_delivered_delivery_updates_status() {
     let env = Env::default();
@@ -1038,6 +1063,16 @@ fn test_on_time_delivery_confirmation() {
 }
 
 #[test]
+fn test_create_deliveries_batch_registers_users() {
+    let env = Env::default();
+    let (client, shipper, _driver, recipient, _escrow_id, reputation_id) = setup_full(&env);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    let metadata1 = DeliveryMetadata {
+        delivery_id: 1,
+        origin: String::from_str(&env, "Origin1"),
+        destination: String::from_str(&env, "Destination1"),
 fn test_cancel_disputed_delivery_rejected() {
     let env = Env::default();
     let (client, shipper, driver, recipient, _escrow_id, _reputation_id) = setup_full(&env);
@@ -1064,6 +1099,36 @@ fn test_late_delivery_confirmation() {
             category: CargoCategory::General,
             fragile: false,
         },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+    let metadata2 = DeliveryMetadata {
+        delivery_id: 2,
+        origin: String::from_str(&env, "Origin2"),
+        destination: String::from_str(&env, "Destination2"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 200,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+    metadata_list.push_back(metadata1);
+    metadata_list.push_back(metadata2);
+
+    let _delivery_ids = client.create_deliveries_batch(&shipper, &recipient, &metadata_list);
+
+    let last_registered: Address = env.as_contract(&reputation_id, || {
+        env.storage()
+            .temporary()
+            .get(&Symbol::new(&env, "registered_user"))
+            .unwrap_or(shipper.clone())
+    });
+    assert_eq!(
+        last_registered, recipient,
+        "Expected recipient to be registered after create_deliveries_batch"
+    );
         created_at: current_time,
         estimated_delivery: estimated_time,
     };

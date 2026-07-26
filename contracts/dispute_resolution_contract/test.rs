@@ -817,3 +817,64 @@ fn test_post_delivery_dispute_can_be_raised_and_resolved() {
     let escrow = MockEscrowContractClient::new(&env, &escrow_id).get_escrow(&10);
     assert_eq!(escrow.status, shared_types::EscrowStatus::Refunded);
 }
+
+// ── ADMIN LIST ENUMERATION TESTS ──────────────────────────────────────────────
+
+#[test]
+fn test_list_admins_returns_initial_admin() {
+    let (env, admin, _sender, _recipient, _driver, _delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let admins = dispute_client.list_admins();
+    assert_eq!(admins.len(), 1);
+    assert_eq!(admins.get(0).unwrap(), admin);
+}
+
+#[test]
+fn test_list_admins_after_adding_admin() {
+    let (env, admin, _sender, _recipient, _driver, _delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let new_admin = Address::generate(&env);
+    dispute_client.add_admin(&admin, &new_admin);
+
+    let admins = dispute_client.list_admins();
+    assert_eq!(admins.len(), 2);
+    assert_eq!(admins.get(0).unwrap(), admin);
+    assert_eq!(admins.get(1).unwrap(), new_admin);
+}
+
+#[test]
+fn test_list_admins_after_removing_admin() {
+    let (env, admin, _sender, _recipient, _driver, _delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let new_admin = Address::generate(&env);
+    dispute_client.add_admin(&admin, &new_admin);
+    dispute_client.remove_admin(&admin, &new_admin);
+
+    let admins = dispute_client.list_admins();
+    assert_eq!(admins.len(), 1);
+    assert_eq!(admins.get(0).unwrap(), admin);
+}
+
+#[test]
+fn test_list_admins_after_multiple_additions_and_removals() {
+    let (env, admin, _sender, _recipient, _driver, _delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let admin2 = Address::generate(&env);
+    let admin3 = Address::generate(&env);
+    let admin4 = Address::generate(&env);
+
+    dispute_client.add_admin(&admin, &admin2);
+    dispute_client.add_admin(&admin2, &admin3);
+    dispute_client.add_admin(&admin3, &admin4);
+
+    let admins = dispute_client.list_admins();
+    assert_eq!(admins.len(), 4);
+
+    dispute_client.remove_admin(&admin2, &admin3);
+    let admins = dispute_client.list_admins();
+    assert_eq!(admins.len(), 3);
+}
