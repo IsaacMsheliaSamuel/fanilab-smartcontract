@@ -798,3 +798,44 @@ fn test_resolve_dispute_split_100_0() {
     assert_eq!(balance(&env, &token, &contract_id), 0);
     assert_eq!(client.get_escrow(&304u64).status, EscrowStatus::Split);
 }
+
+#[test]
+fn test_set_settlement_contract_by_admin() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+
+    let result_before = client.get_settlement_contract();
+    assert_eq!(result_before, None);
+
+    client.set_settlement_contract(&admin, &settlement_contract);
+
+    let result_after = client.get_settlement_contract();
+    assert_eq!(result_after, Some(settlement_contract));
+}
+
+#[test]
+fn test_set_settlement_contract_unauthorized() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+
+    let result = client.try_set_settlement_contract(&attacker, &settlement_contract);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+}
