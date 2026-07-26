@@ -750,3 +750,101 @@ fn test_clear_nonexistent_settlement_contract_succeeds() {
     client.clear_settlement_contract(&admin);
     assert_eq!(client.get_settlement_contract(), None);
 }
+
+// ── Issue #89: propose_admin and accept_admin typed errors ──────────────────
+
+#[test]
+fn test_propose_admin_unauthorized_caller_typed_error() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let attacker = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+
+    let result = client.try_propose_admin(&attacker, &new_admin);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized (typed error), not raw panic"),
+    }
+}
+
+#[test]
+fn test_accept_admin_no_pending_admin_typed_error() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let caller = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+
+    let result = client.try_accept_admin(&caller);
+    match result {
+        Err(Ok(err)) => {
+            assert_ne!(err, FaniLabError::Unauthorized.into());
+            assert!(err.to_string().contains("pending") || err == FaniLabError::InvalidState.into());
+        }
+        _ => panic!("Expected typed error for missing pending admin, not raw panic"),
+    }
+}
+
+#[test]
+fn test_accept_admin_wrong_pending_caller_typed_error() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let new_admin = Address::generate(&env);
+    let wrong_caller = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.propose_admin(&admin, &new_admin);
+
+    let result = client.try_accept_admin(&wrong_caller);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized (typed error), not raw panic"),
+    }
+}
+
+#[test]
+fn test_propose_admin_sets_pending_admin() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let new_admin = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.propose_admin(&admin, &new_admin);
+
+    assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_accept_admin_completes_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let new_admin = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
+
+    assert_eq!(client.get_admin(), new_admin);
+}
