@@ -165,42 +165,63 @@ The contracts emit critical events for off-chain indexing:
 ## 📂 Repository Structure
 
 ```text
-FaniLab-SmartContract/
+fanilab-smartcontract/
 ├── contracts/
 │   ├── escrow_contract/
-│   │   └── lib.rs
+│   │   ├── lib.rs
+│   │   └── Cargo.toml
 │   ├── delivery_contract/
-│   │   └── lib.rs
+│   │   ├── lib.rs
+│   │   ├── test.rs
+│   │   └── Cargo.toml
+│   ├── dispute_resolution_contract/
+│   │   ├── lib.rs
+│   │   ├── test.rs
+│   │   └── Cargo.toml
+│   ├── fleet_management_contract/
+│   │   ├── lib.rs
+│   │   ├── test.rs
+│   │   └── Cargo.toml
+│   ├── identity_reputation_contract/
+│   │   ├── lib.rs
+│   │   ├── test.rs
+│   │   └── Cargo.toml
+│   ├── settlement_contract/
+│   │   ├── src/
+│   │   │   └── lib.rs
+│   │   └── Cargo.toml
 │   └── shared_types/
-│       └── lib.rs
-├── src/
-│   ├── events/
-│   ├── errors/
-│   ├── storage/
-│   └── interfaces/
-├── tests/
-│   ├── integration_tests/
-│   └── contract_tests/
-├── scripts/
-│   ├── deployment/
-│   ├── build/
-│   ├── initialize/
-│   ├── deploy-contract.sh
-│   └── initialize-contract.sh
+│       ├── lib.rs
+│       └── Cargo.toml
 ├── docs/
 │   ├── architecture/
 │   │   ├── smart-contract-architecture.md
 │   │   └── event-system.md
 │   ├── contract-design/
 │   │   └── escrow-design.md
-│   └── protocol/
-│       └── delivery-protocol.md
-├── deploy/
-│   ├── testnet/
-│   └── mainnet/
+│   ├── protocol/
+│   │   └── delivery-protocol.md
+│   ├── API.md
+│   ├── DEPLOYMENT.md
+│   ├── GOVERNANCE.md
+│   ├── SECURITY_AUDIT.md
+│   ├── TESTING.md
+│   └── ARCHITECTURE_DECISION_RECORDS.md
+├── scripts/
+│   ├── deploy-all-contracts.sh
+│   ├── initialize-all-contracts.sh
+│   ├── deploy-contract.sh
+│   └── initialize-contract.sh
+├── sdk/
+│   └── typescript/
 ├── .github/
-│   └── workflows/
-│       └── ci.yml
+│   ├── workflows/
+│   │   ├── ci.yml
+│   │   ├── release.yml
+│   │   ├── security-audit.yml
+│   │   └── deploy-testnet.yml
+│   ├── ISSUE_TEMPLATE/
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── Cargo.toml
 ├── Cargo.lock
 ├── Makefile
@@ -316,9 +337,9 @@ This project uses GitHub Actions for CI/CD. The pipeline `.github/workflows/ci.y
 
 ## 📊 Project Status
 
-![CI Status](https://github.com/fanilab/FaniLab-SmartContract/workflows/Rust%20CI/badge.svg)
-![Security Audit](https://github.com/fanilab/FaniLab-SmartContract/workflows/Security%20Audit/badge.svg)
-[![codecov](https://codecov.io/gh/fanilab/FaniLab-SmartContract/branch/main/graph/badge.svg)](https://codecov.io/gh/fanilab/FaniLab-SmartContract)
+![CI Status](https://github.com/fanilabs/fanilab-smartcontract/workflows/Rust%20CI/badge.svg)
+![Security Audit](https://github.com/fanilabs/fanilab-smartcontract/workflows/Security%20Audit/badge.svg)
+[![codecov](https://codecov.io/gh/fanilabs/fanilab-smartcontract/branch/main/graph/badge.svg)](https://codecov.io/gh/fanilabs/fanilab-smartcontract)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 - **Current Version**: 0.2.0
@@ -361,7 +382,7 @@ This project is licensed under the MIT License - see the `LICENSE` file for deta
 - **Email**: contact@fanilab.com
 - **Twitter**: [@FaniLabHQ](https://twitter.com/FaniLabHQ)
 - **Discord**: [Join our community](https://discord.gg/fanilab)
-- **GitHub**: [FaniLab Organization](https://github.com/fanilab)
+- **GitHub**: [FaniLab Organization](https://github.com/fanilabs)
 
 ---
 
