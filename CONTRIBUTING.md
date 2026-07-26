@@ -19,11 +19,15 @@ Thank you for your interest in contributing to **FaniLab-SmartContract**! We wel
 
 The FaniLab Smart Contract repository is structured as a **Cargo Workspace**. This means multiple smart contracts live in the same repository and share dependencies. 
 
-The workspace consists of three main crates located in the `contracts/` directory:
+The workspace consists of seven crates located in the `contracts/` directory:
 
-*   **`shared_types/`**: The most critical crate. It acts as the common language between all contracts. It contains shared structs (e.g., `DeliveryDetails`), enums (e.g., `DeliveryStatus`), custom errors, and event definitions. *If a data structure needs to be passed between the Escrow and Delivery contracts, it MUST be defined here.*
-*   **`escrow_contract/`**: Handles the locking, releasing, and refunding of funds based on delivery states.
-*   **`delivery_contract/`**: Manages the logistics metadata, driver assignments, and delivery confirmation logic.
+*   **`shared_types/`**: The most critical crate. It acts as the common language between all contracts. It contains shared structs (e.g., `DeliveryDetails`), enums (e.g., `DeliveryStatus`), custom errors, and event definitions. *If a data structure needs to be passed between contracts, it MUST be defined here.*
+*   **`escrow_contract/`**: Handles the locking, releasing, and refunding of funds based on delivery states. Manages platform fees and settlement contract integration.
+*   **`delivery_contract/`**: Manages the logistics metadata, driver assignments, and delivery confirmation logic. Coordinates with `escrow_contract` for payment state changes.
+*   **`dispute_resolution_contract/`**: Manages dispute lifecycle — opening disputes, collecting evidence, and resolving outcomes (refund, pay driver, or split). Calls back into `escrow_contract` and `identity_reputation_contract` on resolution.
+*   **`fleet_management_contract/`**: Handles fleet registration, driver invite/acceptance flows, fleet treasury routing, and fleet membership lifecycle.
+*   **`identity_reputation_contract/`**: Maintains driver profiles, reputation scores, and tier classifications (Bronze/Silver/Gold). Called by other contracts to update or query driver standing.
+*   **`settlement_contract/`**: Provides a token-swap settlement path for cross-currency payouts. Integrated with `escrow_contract`'s release flow.
 
 ### Prerequisites
 
