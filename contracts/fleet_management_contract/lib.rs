@@ -1,9 +1,8 @@
 #![no_std]
-#![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 use shared_types::{
-    events, DriverInvitedEvent, DriverRemovedEvent, FleetRegisteredEvent,
-    FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
+    events, ttl, DriverInvitedEvent, DriverRemovedEvent, FleetRegisteredEvent,
+    FleetTreasuryChangeProposedEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal,
@@ -17,6 +16,11 @@ pub type FleetId = u64;
 /// Maximum number of drivers per fleet roster to prevent unbounded storage growth.
 pub const MAX_ROSTER_SIZE: u32 = 10000;
 
+/// Minimum delay between proposing a fleet treasury change and it becoming
+/// eligible for confirmation, giving active drivers advance notice before
+/// their future payouts are redirected (Issue #70).
+pub const TREASURY_CHANGE_TIMELOCK_SECONDS: u64 = 3 * 24 * 60 * 60; // 3 days
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -28,6 +32,8 @@ pub enum FleetError {
     DriverAlreadyInvited = 5,
     InviteNotFound = 6,
     DriverAlreadyActive = 7,
+    NoPendingTreasuryChange = 8,
+    TimelockNotElapsed = 9,
 }
 
 #[contracttype]
@@ -50,6 +56,15 @@ pub struct FleetProfile {
     pub total_active_drivers: u32,
 }
 
+/// A treasury change proposed by the fleet owner but not yet confirmed.
+/// Becomes eligible for confirmation once `activates_at` has elapsed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingTreasuryChange {
+    pub treasury: Address,
+    pub activates_at: u64,
+}
+
 /// Persistent storage keys for the fleet management contract.
 #[contracttype]
 #[derive(Clone)]
@@ -66,6 +81,8 @@ pub enum DataKey {
     DriverFleet(FleetId, Address),
     /// Persistent key — roster of drivers (addresses) in a fleet, for enumeration.
     FleetRoster(FleetId),
+    /// Persistent key — pending, not-yet-confirmed treasury change for a fleet.
+    PendingTreasury(FleetId),
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -113,6 +130,7 @@ impl FleetManagementContract {
     /// The caller (owner) must sign the transaction.  Returns the new fleet id.
     /// If an identity contract is configured, automatically creates an identity
     /// profile for the owner via a cross-contract call.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn register_fleet(env: Env, owner: Address, treasury: Address) -> FleetId {
         owner.require_auth();
 
@@ -137,9 +155,11 @@ impl FleetManagementContract {
 
         let fleet_key = DataKey::Fleet(fleet_id);
         env.storage().persistent().set(&fleet_key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&fleet_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &fleet_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Issue #73 — if identity contract is configured, register the fleet
         // owner as a driver in the identity_reputation_contract.
@@ -184,11 +204,20 @@ impl FleetManagementContract {
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound))
     }
 
-    /// Update the treasury wallet for an existing fleet.
+    // ── Issue #70 — treasury change timelock ──────────────────────────────────
+
+    /// Propose a new treasury wallet for an existing fleet.  Only the fleet
+    /// owner may call this.  The change does not take effect immediately:
+    /// it becomes eligible for confirmation only after
+    /// `TREASURY_CHANGE_TIMELOCK_SECONDS` have elapsed, giving active drivers
+    /// advance notice (via the `fleet_treasury_change_proposed` event) before
+    /// their future payouts are redirected. Proposing again before
+    /// confirmation overwrites the pending change and restarts the timelock.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn update_fleet_treasury(env: Env, owner: Address, fleet_id: FleetId, treasury: Address) {
         owner.require_auth();
 
-        let mut profile: FleetProfile = env
+        let profile: FleetProfile = env
             .storage()
             .persistent()
             .get(&DataKey::Fleet(fleet_id))
@@ -198,22 +227,90 @@ impl FleetManagementContract {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 
-        profile.treasury = treasury.clone();
+        let activates_at = env
+            .ledger()
+            .timestamp()
+            .saturating_add(TREASURY_CHANGE_TIMELOCK_SECONDS);
+
+        let pending_key = DataKey::PendingTreasury(fleet_id);
+        let pending = PendingTreasuryChange {
+            treasury: treasury.clone(),
+            activates_at,
+        };
+        env.storage().persistent().set(&pending_key, &pending);
+        env.storage().persistent().extend_ttl(
+            &pending_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        env.events().publish(
+            (events::fleet_treasury_change_proposed(&env),),
+            FleetTreasuryChangeProposedEvent {
+                fleet_id,
+                owner,
+                current_treasury: profile.treasury,
+                proposed_treasury: treasury,
+                activates_at,
+            },
+        );
+    }
+
+    /// Confirm a previously proposed treasury change once its timelock has
+    /// elapsed, applying it to the fleet profile used by `get_payout_address`.
+    /// Callable by anyone: the security guarantee is the elapsed delay, not
+    /// caller identity, matching `reclaim_expired_escrow`'s permissionless
+    /// finalization pattern.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn confirm_fleet_treasury_update(env: Env, fleet_id: FleetId) {
+        let pending_key = DataKey::PendingTreasury(fleet_id);
+        let pending: PendingTreasuryChange = env
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::NoPendingTreasuryChange));
+
+        if env.ledger().timestamp() < pending.activates_at {
+            panic_with_error!(&env, FleetError::TimelockNotElapsed);
+        }
+
+        let mut profile: FleetProfile = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Fleet(fleet_id))
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        profile.treasury = pending.treasury.clone();
 
         let fleet_key = DataKey::Fleet(fleet_id);
         env.storage().persistent().set(&fleet_key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&fleet_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &fleet_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+        env.storage().persistent().remove(&pending_key);
 
         env.events().publish(
             (events::fleet_treasury_updated(&env),),
             FleetTreasuryUpdatedEvent {
                 fleet_id,
-                owner,
-                treasury,
+                owner: profile.owner,
+                treasury: pending.treasury,
             },
         );
+    }
+
+    /// Return the pending treasury change for a fleet, if any, so off-chain
+    /// clients (e.g. driver apps) can display the upcoming payout redirect
+    /// and its activation time.
+    pub fn get_pending_treasury_update(
+        env: Env,
+        fleet_id: FleetId,
+    ) -> Option<PendingTreasuryChange> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingTreasury(fleet_id))
     }
 
     // ── Issue #68 — add_driver_to_fleet ───────────────────────────────────────
@@ -223,6 +320,7 @@ impl FleetManagementContract {
     /// `caller` must be the registered fleet owner and must sign the
     /// transaction.  Stores a `Pending` invite for `driver` under this fleet.
     /// The driver must later call `accept_fleet_invite` to become active.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn add_driver_to_fleet(env: Env, caller: Address, fleet_id: FleetId, driver: Address) {
         caller.require_auth();
 
@@ -259,13 +357,17 @@ impl FleetManagementContract {
         env.storage()
             .persistent()
             .set(&invite_key, &DriverFleetStatus::Pending);
-        env.storage()
-            .persistent()
-            .extend_ttl(&invite_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &invite_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Emit event.
-        env.events()
-            .publish((events::driver_invited(&env),), DriverInvitedEvent { fleet_id, driver });
+        env.events().publish(
+            (events::driver_invited(&env),),
+            DriverInvitedEvent { fleet_id, driver },
+        );
     }
 
     // ── Issue #69 — accept_fleet_invite ───────────────────────────────────────
@@ -273,6 +375,7 @@ impl FleetManagementContract {
     /// Accept a pending fleet invite.  The driver themselves must sign this
     /// transaction.  Transitions status from `Pending` → `Active` and
     /// increments `total_active_drivers` on the fleet profile.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn accept_fleet_invite(env: Env, fleet_id: FleetId, driver: Address) {
         // Driver must authorise.
         driver.require_auth();
@@ -302,17 +405,21 @@ impl FleetManagementContract {
         env.storage()
             .persistent()
             .set(&invite_key, &DriverFleetStatus::Active);
-        env.storage()
-            .persistent()
-            .extend_ttl(&invite_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &invite_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Update active driver count on the fleet profile.
         profile.total_active_drivers += 1;
         let fleet_key = DataKey::Fleet(fleet_id);
         env.storage().persistent().set(&fleet_key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&fleet_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &fleet_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Add driver to fleet roster for enumeration.
         let roster_key = DataKey::FleetRoster(fleet_id);
@@ -341,14 +448,18 @@ impl FleetManagementContract {
         if !already_in_roster {
             roster.push_back(driver.clone());
             env.storage().persistent().set(&roster_key, &roster);
-            env.storage()
-                .persistent()
-                .extend_ttl(&roster_key, 518400, 518400);
+            env.storage().persistent().extend_ttl(
+                &roster_key,
+                ttl::LEDGER_TTL_THRESHOLD,
+                ttl::LEDGER_TTL_EXTEND_TO,
+            );
         }
 
         // Emit event.
-        env.events()
-            .publish((events::invite_accepted(&env),), InviteAcceptedEvent { fleet_id, driver });
+        env.events().publish(
+            (events::invite_accepted(&env),),
+            InviteAcceptedEvent { fleet_id, driver },
+        );
     }
 
     // ── Issue #70 — remove_driver_from_fleet ──────────────────────────────────
@@ -359,6 +470,7 @@ impl FleetManagementContract {
     /// `caller` must be either the fleet owner or the driver being removed.
     /// Deletes the driver's fleet record and, if the driver was `Active`,
     /// decrements `total_active_drivers` on the fleet profile.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn remove_driver_from_fleet(env: Env, fleet_id: FleetId, caller: Address, driver: Address) {
         let mut profile: FleetProfile = env
             .storage()
@@ -401,7 +513,11 @@ impl FleetManagementContract {
 
         // Remove driver from fleet roster.
         let roster_key = DataKey::FleetRoster(fleet_id);
-        if let Some(mut roster) = env.storage().persistent().get::<_, soroban_sdk::Vec<Address>>(&roster_key) {
+        if let Some(mut roster) = env
+            .storage()
+            .persistent()
+            .get::<_, soroban_sdk::Vec<Address>>(&roster_key)
+        {
             let mut new_roster = soroban_sdk::Vec::new(&env);
             for i in 0..roster.len() {
                 if let Some(existing) = roster.get(i) {
@@ -412,17 +528,21 @@ impl FleetManagementContract {
             }
             if new_roster.len() > 0 {
                 env.storage().persistent().set(&roster_key, &new_roster);
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&roster_key, 518400, 518400);
+                env.storage().persistent().extend_ttl(
+                    &roster_key,
+                    ttl::LEDGER_TTL_THRESHOLD,
+                    ttl::LEDGER_TTL_EXTEND_TO,
+                );
             } else {
                 env.storage().persistent().remove(&roster_key);
             }
         }
 
         // Emit event.
-        env.events()
-            .publish((events::driver_removed(&env),), DriverRemovedEvent { fleet_id, driver });
+        env.events().publish(
+            (events::driver_removed(&env),),
+            DriverRemovedEvent { fleet_id, driver },
+        );
     }
 
     // ── Issue #72 — get_payout_address ───────────────────────────────────────

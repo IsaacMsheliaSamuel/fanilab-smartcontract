@@ -125,15 +125,41 @@ fn test_get_fleet_unknown_id_panics() {
 }
 
 #[test]
-fn test_update_fleet_treasury_updates_profile() {
+fn test_update_fleet_treasury_does_not_apply_immediately() {
     let (env, client, _admin) = setup_test();
-    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+    let (fleet_id, owner, old_treasury) = register_fleet(&env, &client);
     let new_treasury = Address::generate(&env);
 
     client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
 
+    // Proposing a change must not redirect payouts until confirmed.
     let profile = client.get_fleet(&fleet_id);
-    assert_eq!(profile.treasury, new_treasury);
+    assert_eq!(profile.treasury, old_treasury);
+
+    let pending = client.get_pending_treasury_update(&fleet_id).unwrap();
+    assert_eq!(pending.treasury, new_treasury);
+}
+
+#[test]
+fn test_update_fleet_treasury_emits_proposed_event_immediately() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, treasury) = register_fleet(&env, &client);
+    let new_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+
+    let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
+    assert_eq!(topic0, Symbol::new(&env, "fleet_treasury_change_proposed"));
+
+    let data: (FleetId, Address, Address, Address, u64) =
+        <(FleetId, Address, Address, Address, u64)>::try_from_val(&env, &last_event.2).unwrap();
+    assert_eq!(data.0, fleet_id);
+    assert_eq!(data.1, owner);
+    assert_eq!(data.2, treasury);
+    assert_eq!(data.3, new_treasury);
 }
 
 #[test]
@@ -145,6 +171,49 @@ fn test_update_fleet_treasury_rejects_non_owner() {
     let new_treasury = Address::generate(&env);
 
     client.update_fleet_treasury(&attacker, &fleet_id, &new_treasury);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_confirm_fleet_treasury_update_before_timelock_panics() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+    let new_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+    // Timelock has not elapsed yet — must panic.
+    client.confirm_fleet_treasury_update(&fleet_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_confirm_fleet_treasury_update_without_pending_change_panics() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, _owner, _treasury) = register_fleet(&env, &client);
+
+    // No treasury change was ever proposed — must panic.
+    client.confirm_fleet_treasury_update(&fleet_id);
+}
+
+#[test]
+fn test_confirm_fleet_treasury_update_applies_after_timelock() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _old_treasury) = register_fleet(&env, &client);
+    let new_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + TREASURY_CHANGE_TIMELOCK_SECONDS);
+    client.confirm_fleet_treasury_update(&fleet_id);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.treasury, new_treasury);
+    assert_eq!(client.get_pending_treasury_update(&fleet_id), None);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
+    assert_eq!(topic0, Symbol::new(&env, "fleet_treasury_updated"));
 }
 
 // ── Issue #68 tests — add_driver_to_fleet ────────────────────────────────────
@@ -562,7 +631,6 @@ fn test_get_payout_address_returns_driver_after_removal() {
     assert_eq!(payout, driver);
 }
 
-#[test]
 // ── Issue #73 tests — register_fleet with identity contract ──────────────────
 
 #[test]
@@ -570,8 +638,7 @@ fn test_register_fleet_twice_same_owner_with_identity_contract() {
     let (env, client, admin) = setup_test();
 
     let identity_id = env.register(IdentityReputationContract, ());
-    let identity_client =
-        identity_reputation_contract::Client::new(&env, &identity_id);
+    let identity_client = identity_reputation_contract::Client::new(&env, &identity_id);
 
     client.set_identity_contract(&admin, &identity_id);
 
@@ -595,8 +662,7 @@ fn test_register_fleet_for_existing_driver_succeeds() {
     let (env, client, admin) = setup_test();
 
     let identity_id = env.register(IdentityReputationContract, ());
-    let identity_client =
-        identity_reputation_contract::Client::new(&env, &identity_id);
+    let identity_client = identity_reputation_contract::Client::new(&env, &identity_id);
 
     client.set_identity_contract(&admin, &identity_id);
 
@@ -609,7 +675,8 @@ fn test_register_fleet_for_existing_driver_succeeds() {
     assert!(identity_client.has_driver_profile(&owner));
 }
 
-fn test_get_payout_address_treasury_updates_are_reflected() {
+#[test]
+fn test_get_payout_address_treasury_updates_are_reflected_after_confirmation() {
     let (env, client, _admin) = setup_test();
     let (fleet_id, owner, _old_treasury) = register_fleet(&env, &client);
 
@@ -619,9 +686,30 @@ fn test_get_payout_address_treasury_updates_are_reflected() {
 
     let new_treasury = Address::generate(&env);
     client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + TREASURY_CHANGE_TIMELOCK_SECONDS);
+    client.confirm_fleet_treasury_update(&fleet_id);
 
     let payout = client.get_payout_address(&driver, &fleet_id);
     assert_eq!(payout, new_treasury);
+}
+
+#[test]
+fn test_get_payout_address_uses_old_treasury_during_timelock_delay() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, old_treasury) = register_fleet(&env, &client);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    client.accept_fleet_invite(&fleet_id, &driver);
+
+    let new_treasury = Address::generate(&env);
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+
+    // Still within the timelock delay — payouts must keep routing to the
+    // old treasury until the change is confirmed.
+    let payout = client.get_payout_address(&driver, &fleet_id);
+    assert_eq!(payout, old_treasury);
 }
 
 #[test]

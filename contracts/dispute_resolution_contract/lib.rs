@@ -1,8 +1,7 @@
 #![no_std]
-#![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 use shared_types::{
-    events, DeliveryId, DeliveryStatus, DisputeRaisedEvent, DisputeResolvedPayoutEvent,
+    events, ttl, DeliveryId, DeliveryStatus, DisputeRaisedEvent, DisputeResolvedPayoutEvent,
     DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, EscrowRecord, EscrowStatus, FaniLabError,
 };
 use soroban_sdk::{
@@ -173,6 +172,7 @@ impl DisputeResolutionContract {
             .unwrap_or(0)
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn set_dispute_resolution_limit(env: Env, caller: Address, new_limit: u64) {
     pub fn update_dispute_time_limit(env: Env, caller: Address, new_limit: u64) {
         caller.require_auth();
@@ -189,6 +189,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 
@@ -254,9 +255,11 @@ impl DisputeResolutionContract {
         };
 
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::dispute_raised(&env), delivery_id),
@@ -267,6 +270,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn add_evidence_hash(
         env: Env,
         caller: Address,
@@ -299,9 +303,11 @@ impl DisputeResolutionContract {
 
         dispute.evidence_hashes.push_back(evidence_hash.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::evidence_added(&env), delivery_id),
@@ -309,6 +315,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute_refund_sender(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -330,9 +337,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let delivery_contract_addr = Self::get_delivery_contract(env.clone());
         let delivery: shared_types::DeliveryRecord = env.invoke_contract(
@@ -390,6 +399,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute_split_funds(
         env: Env,
         caller: Address,
@@ -416,9 +426,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
         let escrow: EscrowRecord = env.invoke_contract(
@@ -458,9 +470,11 @@ impl DisputeResolutionContract {
         }
         dispute.status = DisputeStatus::Split;
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let _: () = env.invoke_contract(
             &escrow_addr,
@@ -482,6 +496,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute_pay_driver(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -503,9 +518,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
 
@@ -559,6 +576,7 @@ impl DisputeResolutionContract {
     /// Force-resolve a dispute that has been Open past the configured resolution window.
     /// Any party (sender, recipient, or driver) may call this once the window has elapsed.
     /// Applies a 50/50 default split as the automatic fallback outcome.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn force_resolve_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 
@@ -600,9 +618,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(current_time);
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
         let escrow: EscrowRecord = env.invoke_contract(

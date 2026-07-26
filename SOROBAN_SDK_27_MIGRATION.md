@@ -32,7 +32,7 @@ cargo build --target wasm32v1-none --release
 ```
 
 ### 4. Event Publishing API Deprecation
-The `env.events().publish()` API is deprecated in SDK 27.0.0 but remains functional. Added `#[allow(deprecated)]` annotations to all contract modules to suppress warnings until the SDK team provides a stable replacement.
+The `env.events().publish()` API is deprecated in SDK 27.0.0 but remains functional. A crate-level `#![allow(deprecated)]` was originally added to every contract module to suppress the warning, but that blanket suppression also silenced any *other* deprecation introduced by a later SDK bump. It has since been narrowed to a `#[allow(deprecated)]` on each individual function that calls `events().publish()`, so future unrelated deprecations are no longer silently hidden (see Issue #114).
 
 **Files Modified**:
 - `contracts/delivery_contract/lib.rs`
@@ -40,7 +40,7 @@ The `env.events().publish()` API is deprecated in SDK 27.0.0 but remains functio
 - `contracts/dispute_resolution_contract/lib.rs`
 - `contracts/identity_reputation_contract/lib.rs`
 - `contracts/fleet_management_contract/lib.rs`
-- `contracts/settlement_contract/src/lib.rs`
+- `contracts/settlement_contract/lib.rs`
 
 ### 5. Unused Variable Fixes
 Fixed unused variable warnings in `settlement_contract` by prefixing unused parameters with underscore (`_`).
@@ -107,7 +107,7 @@ If you're migrating your own Soroban project to SDK 27.0.0, follow these steps:
 - [ ] Update `Cargo.toml` workspace dependencies to `soroban-sdk = "27.0.0"`
 - [ ] Install the new WASM target: `rustup target add wasm32v1-none`
 - [ ] Update all build commands to use `--target wasm32v1-none`
-- [ ] Add `#[allow(deprecated)]` to contract modules if using `env.events().publish()`
+- [ ] Add `#[allow(deprecated)]` to individual functions that call `env.events().publish()` (avoid a crate-level `#![allow(deprecated)]`, which would hide unrelated future deprecations too)
 - [ ] Update CI/CD workflows to use `wasm32v1-none` target
 - [ ] Regenerate `Cargo.lock`: `cargo update`
 - [ ] Run `cargo build --target wasm32v1-none --release` to verify
