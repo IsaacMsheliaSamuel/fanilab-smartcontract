@@ -41,6 +41,7 @@ pub struct DisputeCase {
 #[derive(Clone)]
 pub enum DataKey {
     Admin(Address),
+    AdminList,
     DeliveryContract,
     EscrowContract,
     IdentityReputationContract,
@@ -81,7 +82,11 @@ impl DisputeResolutionContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeResolutionLimit, &dispute_resolution_limit);
-        env.storage().instance().set(&DataKey::Admin(admin), &true);
+        env.storage().instance().set(&DataKey::Admin(admin.clone()), &true);
+
+        let mut admin_list = Vec::new(&env);
+        admin_list.push_back(admin);
+        env.storage().instance().set(&DataKey::AdminList, &admin_list);
     }
 
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) {
@@ -91,7 +96,18 @@ impl DisputeResolutionContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey::Admin(new_admin), &true);
+            .set(&DataKey::Admin(new_admin.clone()), &true);
+
+        let mut admin_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminList)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if !admin_list.iter().any(|a| a == new_admin) {
+            admin_list.push_back(new_admin);
+            env.storage().instance().set(&DataKey::AdminList, &admin_list);
+        }
     }
 
     pub fn remove_admin(env: Env, caller: Address, old_admin: Address) {
@@ -99,7 +115,21 @@ impl DisputeResolutionContract {
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
-        env.storage().instance().remove(&DataKey::Admin(old_admin));
+        env.storage().instance().remove(&DataKey::Admin(old_admin.clone()));
+
+        let mut admin_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminList)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut new_list = Vec::new(&env);
+        for admin in admin_list.iter() {
+            if admin != old_admin {
+                new_list.push_back(admin);
+            }
+        }
+        env.storage().instance().set(&DataKey::AdminList, &new_list);
     }
 
     pub fn is_admin(env: Env, admin: Address) -> bool {
@@ -107,6 +137,13 @@ impl DisputeResolutionContract {
             .instance()
             .get(&DataKey::Admin(admin))
             .unwrap_or(false)
+    }
+
+    pub fn list_admins(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AdminList)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn get_delivery_contract(env: Env) -> Address {
