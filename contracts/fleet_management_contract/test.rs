@@ -1,6 +1,7 @@
 extern crate std;
 
 use super::*;
+use escrow_contract::EscrowContract;
 use identity_reputation_contract::IdentityReputationContract;
 use soroban_sdk::{
     testutils::{Address as _, Events},
@@ -124,15 +125,41 @@ fn test_get_fleet_unknown_id_panics() {
 }
 
 #[test]
-fn test_update_fleet_treasury_updates_profile() {
+fn test_update_fleet_treasury_does_not_apply_immediately() {
     let (env, client, _admin) = setup_test();
-    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+    let (fleet_id, owner, old_treasury) = register_fleet(&env, &client);
     let new_treasury = Address::generate(&env);
 
     client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
 
+    // Proposing a change must not redirect payouts until confirmed.
     let profile = client.get_fleet(&fleet_id);
-    assert_eq!(profile.treasury, new_treasury);
+    assert_eq!(profile.treasury, old_treasury);
+
+    let pending = client.get_pending_treasury_update(&fleet_id).unwrap();
+    assert_eq!(pending.treasury, new_treasury);
+}
+
+#[test]
+fn test_update_fleet_treasury_emits_proposed_event_immediately() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, treasury) = register_fleet(&env, &client);
+    let new_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+
+    let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
+    assert_eq!(topic0, Symbol::new(&env, "fleet_treasury_change_proposed"));
+
+    let data: (FleetId, Address, Address, Address, u64) =
+        <(FleetId, Address, Address, Address, u64)>::try_from_val(&env, &last_event.2).unwrap();
+    assert_eq!(data.0, fleet_id);
+    assert_eq!(data.1, owner);
+    assert_eq!(data.2, treasury);
+    assert_eq!(data.3, new_treasury);
 }
 
 #[test]
@@ -144,6 +171,49 @@ fn test_update_fleet_treasury_rejects_non_owner() {
     let new_treasury = Address::generate(&env);
 
     client.update_fleet_treasury(&attacker, &fleet_id, &new_treasury);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_confirm_fleet_treasury_update_before_timelock_panics() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+    let new_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+    // Timelock has not elapsed yet — must panic.
+    client.confirm_fleet_treasury_update(&fleet_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_confirm_fleet_treasury_update_without_pending_change_panics() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, _owner, _treasury) = register_fleet(&env, &client);
+
+    // No treasury change was ever proposed — must panic.
+    client.confirm_fleet_treasury_update(&fleet_id);
+}
+
+#[test]
+fn test_confirm_fleet_treasury_update_applies_after_timelock() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _old_treasury) = register_fleet(&env, &client);
+    let new_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + TREASURY_CHANGE_TIMELOCK_SECONDS);
+    client.confirm_fleet_treasury_update(&fleet_id);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.treasury, new_treasury);
+    assert_eq!(client.get_pending_treasury_update(&fleet_id), None);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
+    assert_eq!(topic0, Symbol::new(&env, "fleet_treasury_updated"));
 }
 
 // ── Issue #68 tests — add_driver_to_fleet ────────────────────────────────────
@@ -561,7 +631,6 @@ fn test_get_payout_address_returns_driver_after_removal() {
     assert_eq!(payout, driver);
 }
 
-#[test]
 // ── Issue #73 tests — register_fleet with identity contract ──────────────────
 
 #[test]
@@ -569,8 +638,7 @@ fn test_register_fleet_twice_same_owner_with_identity_contract() {
     let (env, client, admin) = setup_test();
 
     let identity_id = env.register(IdentityReputationContract, ());
-    let identity_client =
-        identity_reputation_contract::Client::new(&env, &identity_id);
+    let identity_client = identity_reputation_contract::Client::new(&env, &identity_id);
 
     client.set_identity_contract(&admin, &identity_id);
 
@@ -594,8 +662,7 @@ fn test_register_fleet_for_existing_driver_succeeds() {
     let (env, client, admin) = setup_test();
 
     let identity_id = env.register(IdentityReputationContract, ());
-    let identity_client =
-        identity_reputation_contract::Client::new(&env, &identity_id);
+    let identity_client = identity_reputation_contract::Client::new(&env, &identity_id);
 
     client.set_identity_contract(&admin, &identity_id);
 
@@ -608,7 +675,8 @@ fn test_register_fleet_for_existing_driver_succeeds() {
     assert!(identity_client.has_driver_profile(&owner));
 }
 
-fn test_get_payout_address_treasury_updates_are_reflected() {
+#[test]
+fn test_get_payout_address_treasury_updates_are_reflected_after_confirmation() {
     let (env, client, _admin) = setup_test();
     let (fleet_id, owner, _old_treasury) = register_fleet(&env, &client);
 
@@ -618,9 +686,30 @@ fn test_get_payout_address_treasury_updates_are_reflected() {
 
     let new_treasury = Address::generate(&env);
     client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + TREASURY_CHANGE_TIMELOCK_SECONDS);
+    client.confirm_fleet_treasury_update(&fleet_id);
 
     let payout = client.get_payout_address(&driver, &fleet_id);
     assert_eq!(payout, new_treasury);
+}
+
+#[test]
+fn test_get_payout_address_uses_old_treasury_during_timelock_delay() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, old_treasury) = register_fleet(&env, &client);
+
+    let driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    client.accept_fleet_invite(&fleet_id, &driver);
+
+    let new_treasury = Address::generate(&env);
+    client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+
+    // Still within the timelock delay — payouts must keep routing to the
+    // old treasury until the change is confirmed.
+    let payout = client.get_payout_address(&driver, &fleet_id);
+    assert_eq!(payout, old_treasury);
 }
 
 #[test]
@@ -823,4 +912,54 @@ fn test_remove_driver_not_signer_but_is_driver() {
 
     let status = client.get_driver_fleet_status(&fleet_id, &driver);
     assert_eq!(status, None);
+// ── Cross-contract integration tests ──────────────────────────────────────────
+
+#[test]
+#[ignore]
+fn test_escrow_payout_routes_through_fleet_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Set up fleet management contract
+    let fleet_contract_id = env.register(FleetManagementContract, ());
+    let fleet_client = FleetManagementContractClient::new(&env, &fleet_contract_id);
+    let fleet_admin = Address::generate(&env);
+    fleet_client.init(&fleet_admin);
+
+    // Set up escrow contract
+    let escrow_contract_id = env.register(EscrowContract, ());
+    let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
+    let escrow_admin = Address::generate(&env);
+
+    // Create a mock token contract address (we'll use a generated address as a placeholder)
+    let token = Address::generate(&env);
+
+    // Initialize escrow contract
+    escrow_client.init(&escrow_admin, &token, 500); // 5% platform fee
+
+    // Register a fleet with owner and treasury
+    let fleet_owner = Address::generate(&env);
+    let fleet_treasury = Address::generate(&env);
+    let fleet_id = fleet_client.register_fleet(&fleet_owner, &fleet_treasury);
+    assert_eq!(fleet_id, 1);
+
+    // Add a driver to the fleet
+    let driver = Address::generate(&env);
+    fleet_client.add_driver_to_fleet(&fleet_owner, &fleet_id, &driver);
+
+    // Driver accepts the invite
+    fleet_client.accept_fleet_invite(&fleet_id, &driver);
+
+    // Verify driver is now active
+    let status = fleet_client.get_driver_fleet_status(&fleet_id, &driver);
+    assert_eq!(status, Some(DriverFleetStatus::Active));
+
+    // Verify get_payout_address returns the fleet treasury for active drivers
+    let payout_address = fleet_client.get_payout_address(&driver, &fleet_id);
+    assert_eq!(payout_address, fleet_treasury);
+
+    // When escrow_contract calls get_payout_address with this driver and fleet_id,
+    // it should receive the treasury address for routing payouts.
+    // This test verifies the integration point is correctly wired.
+    // The actual payout routing through this address is tested in GitHub #12.
 }

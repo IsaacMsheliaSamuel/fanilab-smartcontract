@@ -1,8 +1,7 @@
 #![no_std]
-#![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 use shared_types::{
-    events, DeliveryId, DeliveryStatus, DisputeRaisedEvent, DisputeResolvedPayoutEvent,
+    events, ttl, DeliveryId, DeliveryStatus, DisputeRaisedEvent, DisputeResolvedPayoutEvent,
     DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, EscrowRecord, EscrowStatus, FaniLabError,
 };
 use soroban_sdk::{
@@ -41,6 +40,7 @@ pub struct DisputeCase {
 #[derive(Clone)]
 pub enum DataKey {
     Admin(Address),
+    AdminList,
     DeliveryContract,
     EscrowContract,
     IdentityReputationContract,
@@ -81,7 +81,11 @@ impl DisputeResolutionContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeResolutionLimit, &dispute_resolution_limit);
-        env.storage().instance().set(&DataKey::Admin(admin), &true);
+        env.storage().instance().set(&DataKey::Admin(admin.clone()), &true);
+
+        let mut admin_list = Vec::new(&env);
+        admin_list.push_back(admin);
+        env.storage().instance().set(&DataKey::AdminList, &admin_list);
     }
 
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) {
@@ -91,7 +95,18 @@ impl DisputeResolutionContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey::Admin(new_admin), &true);
+            .set(&DataKey::Admin(new_admin.clone()), &true);
+
+        let mut admin_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminList)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if !admin_list.iter().any(|a| a == new_admin) {
+            admin_list.push_back(new_admin);
+            env.storage().instance().set(&DataKey::AdminList, &admin_list);
+        }
     }
 
     pub fn remove_admin(env: Env, caller: Address, old_admin: Address) {
@@ -99,7 +114,21 @@ impl DisputeResolutionContract {
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
-        env.storage().instance().remove(&DataKey::Admin(old_admin));
+        env.storage().instance().remove(&DataKey::Admin(old_admin.clone()));
+
+        let mut admin_list: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminList)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut new_list = Vec::new(&env);
+        for admin in admin_list.iter() {
+            if admin != old_admin {
+                new_list.push_back(admin);
+            }
+        }
+        env.storage().instance().set(&DataKey::AdminList, &new_list);
     }
 
     pub fn is_admin(env: Env, admin: Address) -> bool {
@@ -107,6 +136,13 @@ impl DisputeResolutionContract {
             .instance()
             .get(&DataKey::Admin(admin))
             .unwrap_or(false)
+    }
+
+    pub fn list_admins(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AdminList)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn get_delivery_contract(env: Env) -> Address {
@@ -173,6 +209,7 @@ impl DisputeResolutionContract {
             .unwrap_or(0)
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn set_dispute_resolution_limit(env: Env, caller: Address, new_limit: u64) {
     pub fn update_dispute_time_limit(env: Env, caller: Address, new_limit: u64) {
         caller.require_auth();
@@ -189,6 +226,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 
@@ -213,6 +251,12 @@ impl DisputeResolutionContract {
                 if current_time > delivered_at + dispute_limit {
                     panic_with_error!(&env, FaniLabError::InvalidState);
                 }
+                // Call delivery contract to transition to Disputed
+                let _: () = env.invoke_contract(
+                    &delivery_contract_addr,
+                    &Symbol::new(&env, "raise_dispute"),
+                    soroban_sdk::vec![&env, caller.into_val(&env), delivery_id.into_val(&env)],
+                );
             }
             DeliveryStatus::Active | DeliveryStatus::InTransit => {
                 // Call delivery contract to transition to Disputed and pause escrow
@@ -254,9 +298,11 @@ impl DisputeResolutionContract {
         };
 
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::dispute_raised(&env), delivery_id),
@@ -267,6 +313,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn add_evidence_hash(
         env: Env,
         caller: Address,
@@ -299,9 +346,11 @@ impl DisputeResolutionContract {
 
         dispute.evidence_hashes.push_back(evidence_hash.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (events::evidence_added(&env), delivery_id),
@@ -309,6 +358,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute_refund_sender(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -330,9 +380,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let delivery_contract_addr = Self::get_delivery_contract(env.clone());
         let delivery: shared_types::DeliveryRecord = env.invoke_contract(
@@ -390,6 +442,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute_split_funds(
         env: Env,
         caller: Address,
@@ -416,9 +469,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
         let escrow: EscrowRecord = env.invoke_contract(
@@ -458,9 +513,11 @@ impl DisputeResolutionContract {
         }
         dispute.status = DisputeStatus::Split;
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let _: () = env.invoke_contract(
             &escrow_addr,
@@ -482,6 +539,7 @@ impl DisputeResolutionContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute_pay_driver(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -503,9 +561,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
 
@@ -559,6 +619,7 @@ impl DisputeResolutionContract {
     /// Force-resolve a dispute that has been Open past the configured resolution window.
     /// Any party (sender, recipient, or driver) may call this once the window has elapsed.
     /// Applies a 50/50 default split as the automatic fallback outcome.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn force_resolve_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 
@@ -600,9 +661,11 @@ impl DisputeResolutionContract {
         dispute.resolved_at = Some(current_time);
         dispute.resolved_by = Some(caller.clone());
         env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
         let escrow: EscrowRecord = env.invoke_contract(

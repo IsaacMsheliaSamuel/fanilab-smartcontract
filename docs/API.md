@@ -115,6 +115,14 @@ Update the platform fee percentage.
 - `Unauthorized` - Caller is not admin
 - `InvalidFee` - Fee exceeds 10%
 
+**Example:**
+```rust
+escrow_contract.update_platform_fee(
+    &admin_address,
+    500 // 5% fee
+);
+```
+
 #### `propose_admin`
 Initiate admin transfer to a new address.
 
@@ -124,6 +132,14 @@ Initiate admin transfer to a new address.
 
 **Authorization:** Current admin
 
+**Example:**
+```rust
+escrow_contract.propose_admin(
+    &current_admin,
+    &new_admin_address
+);
+```
+
 #### `accept_admin`
 Complete admin transfer (called by proposed admin).
 
@@ -131,6 +147,11 @@ Complete admin transfer (called by proposed admin).
 - `new_admin: Address` - New admin accepting the role
 
 **Authorization:** Proposed admin
+
+**Example:**
+```rust
+escrow_contract.accept_admin(&new_admin_address);
+```
 
 #### `set_settlement_contract`
 Configure settlement contract for currency swaps.
@@ -162,6 +183,18 @@ Lock funds for a delivery.
 
 **Events:** `escrow_funded`
 
+**Example:**
+```rust
+escrow_contract.create_escrow(
+    &sender,
+    &recipient,
+    &driver,
+    1u64,              // delivery_id
+    &usdc_token,       // token address
+    50_000_000i128     // 50 USDC (6 decimals)
+);
+```
+
 #### `release_escrow`
 Release funds to driver after successful delivery.
 
@@ -184,6 +217,14 @@ Release funds to driver after successful delivery.
 - Transfers platform_fee to admin
 - Sets escrow status to Released
 
+**Example:**
+```rust
+escrow_contract.release_escrow(
+    &recipient,
+    1u64  // delivery_id
+);
+```
+
 #### `refund_escrow`
 Refund funds to sender (e.g., cancelled delivery).
 
@@ -200,6 +241,14 @@ Refund funds to sender (e.g., cancelled delivery).
 - `InsufficientFunds` - Contract balance insufficient
 
 **Events:** `escrow_refunded`
+
+**Example:**
+```rust
+escrow_contract.refund_escrow(
+    &sender,
+    1u64  // delivery_id
+);
+```
 
 #### `raise_dispute`
 Pause escrow for dispute resolution.
@@ -236,6 +285,15 @@ Admin resolution: release to driver or refund to sender.
 
 **Events:** `dispute_resolved`, `escrow_released` or `escrow_refunded`
 
+**Example:**
+```rust
+escrow_contract.resolve_dispute(
+    &admin,
+    1u64,   // delivery_id
+    true    // true = release to driver
+);
+```
+
 #### `resolve_dispute_split`
 Admin resolution: split funds between sender and driver.
 
@@ -252,6 +310,15 @@ Admin resolution: split funds between sender and driver.
 - `InvalidFee` - sender_share_bps > 10000
 
 **Events:** `dispute_resolved`
+
+**Example:**
+```rust
+escrow_contract.resolve_dispute_split(
+    &admin,
+    1u64,    // delivery_id
+    6000     // 60% to sender, 40% to driver
+);
+```
 
 ### Query Functions
 
@@ -372,6 +439,30 @@ Create a new delivery request.
 - Stores delivery record with Pending status
 - Sets creation timestamp
 
+**Example:**
+```rust
+use shared_types::{DeliveryMetadata, CargoDescriptor, CargoCategory};
+
+let metadata = DeliveryMetadata {
+    delivery_id: 1,
+    origin: String::from_str(&env, "New York"),
+    destination: String::from_str(&env, "Los Angeles"),
+    cargo_description: CargoDescriptor {
+        weight_grams: 50000,
+        category: CargoCategory::Electronics,
+        fragile: true,
+    },
+    created_at: env.ledger().timestamp(),
+    estimated_delivery: env.ledger().timestamp() + 86400 * 3,
+};
+
+let delivery_id = delivery_contract.create_delivery(
+    &sender,
+    &recipient,
+    &metadata
+);
+```
+
 #### `assign_driver`
 Assign a driver to a delivery.
 
@@ -393,6 +484,15 @@ Assign a driver to a delivery.
 - Sets delivery.driver to specified address
 - Updates status to Active
 
+**Example:**
+```rust
+delivery_contract.assign_driver(
+    &admin,
+    &delivery_id,
+    &driver
+);
+```
+
 #### `mark_in_transit`
 Driver marks delivery as actively in transit.
 
@@ -411,6 +511,11 @@ Driver marks delivery as actively in transit.
 **State Changes:**
 - Updates status to InTransit
 - Records transit_started_at timestamp
+
+**Example:**
+```rust
+delivery_contract.mark_in_transit(&driver, &delivery_id);
+```
 
 #### `confirm_delivery`
 Recipient confirms successful delivery.
@@ -435,6 +540,11 @@ Recipient confirms successful delivery.
 - Increments driver's deliveries_completed
 - Increases driver's reputation_score
 
+**Example:**
+```rust
+delivery_contract.confirm_delivery(&recipient, &delivery_id);
+```
+
 #### `cancel_delivery`
 Sender cancels a delivery.
 
@@ -454,6 +564,11 @@ Sender cancels a delivery.
 - Updates status to Cancelled
 - Calls escrow_contract.refund_escrow
 
+**Example:**
+```rust
+delivery_contract.cancel_delivery(&sender, &delivery_id);
+```
+
 #### `raise_dispute`
 Sender or recipient raises a dispute.
 
@@ -472,6 +587,11 @@ Sender or recipient raises a dispute.
 **State Changes:**
 - Updates status to Disputed
 - Calls escrow_contract.raise_dispute to pause funds
+
+**Example:**
+```rust
+delivery_contract.raise_dispute(&sender, &delivery_id);
+```
 
 ### Query Functions
 
@@ -593,6 +713,11 @@ Grant admin privileges to a new address.
 **Errors:**
 - `Unauthorized` - Caller is not an admin
 
+**Example:**
+```rust
+dispute_contract.add_admin(&current_admin, &new_admin);
+```
+
 #### `remove_admin`
 Revoke admin privileges from an address.
 
@@ -604,6 +729,11 @@ Revoke admin privileges from an address.
 
 **Errors:**
 - `Unauthorized` - Caller is not an admin
+
+**Example:**
+```rust
+dispute_contract.remove_admin(&current_admin, &old_admin);
+```
 
 #### `set_identity_reputation_contract`
 Configure the identity/reputation contract address used for reputation penalties.
@@ -732,6 +862,11 @@ Admin verdict: full refund to sender. Applies a reputation penalty to the driver
 - Calls `identity_reputation_contract.decrease_reputation` (−10 points, if configured)
 - Calls `escrow_contract.resolve_dispute` with `release_to_driver = false`
 
+**Example:**
+```rust
+dispute_contract.resolve_dispute_refund_sender(&admin, &delivery_id);
+```
+
 #### `resolve_dispute_pay_driver`
 Admin verdict: full payout to driver.
 
@@ -751,6 +886,11 @@ Admin verdict: full payout to driver.
 **State Changes:**
 - Sets `DisputeCase.status` to `ResolvedPayout`
 - Calls `escrow_contract.resolve_dispute` with `release_to_driver = true`
+
+**Example:**
+```rust
+dispute_contract.resolve_dispute_pay_driver(&admin, &delivery_id);
+```
 
 #### `resolve_dispute_split_funds`
 Admin verdict: split escrow funds between sender and driver.
@@ -772,6 +912,15 @@ Admin verdict: split escrow funds between sender and driver.
 **State Changes:**
 - Sets `DisputeCase.status` to `Split`
 - Calls `escrow_contract.resolve_dispute_split` with the specified basis-point split
+
+**Example:**
+```rust
+dispute_contract.resolve_dispute_split_funds(
+    &admin,
+    &delivery_id,
+    5000  // 50/50 split
+);
+```
 
 ---
 
@@ -910,21 +1059,17 @@ Retrieve fleet profile.
 - `FleetNotFound` - No fleet with that ID exists
 
 #### `update_fleet_treasury`
-Update the treasury wallet for an existing fleet.
+Propose a new treasury wallet for an existing fleet. Does **not** take effect
+immediately — the change becomes eligible for confirmation only after
+`TREASURY_CHANGE_TIMELOCK_SECONDS` (3 days) have elapsed, giving active
+drivers advance notice before their future payouts are redirected. Calling
+this again before confirmation overwrites the pending change and restarts
+the timelock.
 
 **Parameters:**
 - `owner: Address` - Fleet owner (must sign)
 - `fleet_id: FleetId` - Fleet identifier
-- `treasury: Address` - New treasury wallet address
-- `FleetNotFound` - Invalid fleet_id
-
-#### `update_fleet_treasury`
-Update treasury wallet for a fleet.
-
-**Parameters:**
-- `owner: Address` - Fleet owner (caller)
-- `fleet_id: FleetId` - Fleet identifier
-- `treasury: Address` - New treasury address
+- `treasury: Address` - Proposed new treasury wallet address
 
 **Authorization:** Fleet owner
 
@@ -932,7 +1077,33 @@ Update treasury wallet for a fleet.
 - `FleetNotFound` - No fleet with that ID exists
 - `Unauthorized` - Caller is not the fleet owner
 
-**Events:** `fleet_treasury_updated`
+**Events:** `fleet_treasury_change_proposed` (emitted immediately, on proposal)
+
+#### `confirm_fleet_treasury_update`
+Apply a previously proposed treasury change once its timelock has elapsed.
+Callable by anyone — the security guarantee is the elapsed delay, not caller
+identity (mirrors `reclaim_expired_escrow`'s permissionless finalization
+pattern).
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+
+**Errors:**
+- `NoPendingTreasuryChange` - No treasury change has been proposed for this fleet
+- `TimelockNotElapsed` - The proposal's timelock has not yet elapsed
+- `FleetNotFound` - No fleet with that ID exists
+
+**Events:** `fleet_treasury_updated` (emitted on confirmation, once the change takes effect)
+
+#### `get_pending_treasury_update`
+Return the pending treasury change for a fleet, if any, so off-chain clients
+(e.g. driver apps) can display the upcoming payout redirect and its
+activation time.
+
+**Parameters:**
+- `fleet_id: FleetId` - Fleet identifier
+
+**Returns:** `Option<PendingTreasuryChange>`
 
 ### Driver Management
 
@@ -1186,6 +1357,11 @@ Update a driver's KYC verification status.
 
 **Events:** `kyc_status_updated`
 
+**Example:**
+```rust
+identity_contract.update_driver_kyc_status(&admin, &driver, &true);
+```
+
 ### Profile Management
 
 #### `register_driver`
@@ -1203,6 +1379,11 @@ Register a new driver profile with a starting reputation score of 50.
 
 **State Changes:**
 - Creates `DriverProfile` with `reputation_score = 50`, `deliveries_completed = 0`, `kyc_verified = false`
+
+**Example:**
+```rust
+identity_contract.register_driver(&driver);
+```
 
 #### `register_user`
 Register a new user (sender/recipient) profile.
@@ -1267,6 +1448,17 @@ Increase a driver's reputation score after a successful delivery.
 - Caps `reputation_score` at 100
 - Increments `deliveries_completed`
 
+**Example:**
+```rust
+identity_contract.increase_reputation(
+    &delivery_contract,
+    &driver,
+    1u64,      // delivery_id
+    6000u32,   // weight_grams (adds bonus)
+    true       // fragile (adds bonus)
+);
+```
+
 #### `decrease_reputation`
 Decrease a driver's reputation score following a dispute resolved in the sender's favour.
 
@@ -1286,6 +1478,15 @@ Decrease a driver's reputation score following a dispute resolved in the sender'
 
 **State Changes:**
 - Decreases `reputation_score` by `points`, flooring at 0 (saturating subtraction)
+
+**Example:**
+```rust
+identity_contract.decrease_reputation(
+    &dispute_contract,
+    &driver,
+    10u32  // deduct 10 points
+);
+```
 
 ### Tier & Eligibility
 

@@ -2,7 +2,7 @@
 
 The FaniLab decentralized logistics economy is powered by a modular, secure, and upgradeable multi-contract architecture built on the Stellar Soroban network.
 
-To ensure separation of concerns, the system is broken down into **7 core smart contracts (and libraries)**.
+To ensure separation of concerns, the system is broken down into **6 deployable core smart contracts plus 1 shared (non-deployed) library**.
 
 ## 1. `shared_types` (Library)
 Houses all shared Enums, Structs, and Data representations across the entire platform.

@@ -1,5 +1,4 @@
 #![no_std]
-#![allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
 
 use shared_types::{
     escrow_key, events, EscrowRecord, EscrowStatus, FaniLabError, ProtocolConfig, StorageKey,
@@ -150,6 +149,43 @@ fn payout_driver(
     token::Client::new(env, token).transfer(&env.current_contract_address(), &payout_address, &amount);
 }
 
+fn settle_escrow_funds(
+    env: &Env,
+    record: &EscrowRecord,
+    fleet_management_addr: Option<Address>,
+) {
+    let platform_fee_bps: u32 = env
+        .storage()
+        .instance()
+        .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
+        .map(|config| config.platform_fee_bps)
+        .unwrap_or(0);
+    let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+    let driver_amount = record.amount.saturating_sub(platform_fee);
+
+    payout_driver(
+        &env,
+        &record.token,
+        &record.driver,
+        driver_amount,
+        fleet_management_addr.as_ref(),
+        record.fleet_id,
+    );
+
+    if platform_fee > 0 {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&StorageKey::Admin)
+            .expect("Not initialized");
+        token::Client::new(&env, &record.token).transfer(
+            &env.current_contract_address(),
+            &admin,
+            &platform_fee,
+        );
+    }
+}
+
 fn save_escrow(env: &Env, delivery_id: u64, record: &EscrowRecord) {
     let key = escrow_key(delivery_id);
     env.storage().persistent().set(&key, record);
@@ -245,6 +281,7 @@ pub struct EscrowContract;
 
 #[contractimpl]
 impl EscrowContract {
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn init(env: Env, admin: Address, token: Address, platform_fee_bps: u32) {
         if env.storage().instance().has(&StorageKey::Admin) {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
@@ -279,6 +316,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn update_platform_fee(env: Env, admin: Address, new_fee_bps: u32) {
         let stored_admin: Address = env
             .storage()
@@ -351,6 +389,7 @@ impl EscrowContract {
         load_protocol_config(&env).slippage_tolerance_bps
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn set_settlement_contract(env: Env, admin: Address, settlement_contract: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
@@ -418,6 +457,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn accept_admin(env: Env, new_admin: Address) {
         new_admin.require_auth();
         let pending: Address = env
@@ -445,6 +485,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn set_paused(env: Env, admin: Address, paused: bool) {
         admin.require_auth();
         require_admin(&env, &admin);
@@ -461,6 +502,7 @@ impl EscrowContract {
 
     // ── Escrow lifecycle ──────────────────────────────────────────────────────
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn create_escrow(
         env: Env,
         sender: Address,
@@ -582,6 +624,7 @@ impl EscrowContract {
     /// Create multiple escrows in a single transaction.  Sender must authorize.
     /// Takes a list of (delivery_id, driver, amount) tuples. All escrows use the
     /// configured protocol token. Returns the count of escrows created.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn create_escrows_batch(
         env: Env,
         sender: Address,
@@ -697,6 +740,7 @@ impl EscrowContract {
         }
 
         count
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn mark_holdback_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         let mut record = load_escrow(&env, delivery_id);
@@ -715,6 +759,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn release_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         require_not_paused(&env);
@@ -735,6 +780,7 @@ impl EscrowContract {
         }
 
         let base_fee_bps: u32 = env
+        let platform_fee_bps: u32 = env
             .storage()
             .instance()
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
@@ -752,27 +798,7 @@ impl EscrowContract {
             .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
         let fleet_management = get_fleet_management_contract(&env);
-        payout_driver(
-            &env,
-            &record.token,
-            &record.driver,
-            driver_amount,
-            fleet_management.as_ref(),
-            record.fleet_id,
-        );
-
-        if platform_fee > 0 {
-            let admin: Address = env
-                .storage()
-                .instance()
-                .get(&StorageKey::Admin)
-                .expect("Not initialized");
-            token::Client::new(&env, &record.token).transfer(
-                &env.current_contract_address(),
-                &admin,
-                &platform_fee,
-            );
-        }
+        settle_escrow_funds(&env, &record, fleet_management);
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
@@ -798,6 +824,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn refund_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         require_not_paused(&env);
@@ -847,6 +874,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         let mut record = load_escrow(&env, delivery_id);
@@ -871,6 +899,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute(env: Env, caller: Address, delivery_id: u64, release_to_driver: bool) {
         caller.require_auth();
         require_not_paused(&env);
@@ -898,28 +927,7 @@ impl EscrowContract {
                 .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
             let fleet_management = get_fleet_management_contract(&env);
-            payout_driver(
-                &env,
-                &record.token,
-                &record.driver,
-                driver_amount,
-                fleet_management.as_ref(),
-                record.fleet_id,
-            );
-
-            if platform_fee > 0 {
-                let admin: Address = env
-                    .storage()
-                    .instance()
-                    .get(&StorageKey::Admin)
-                    .expect("Not initialized");
-                token::Client::new(&env, &record.token).transfer(
-                    &env.current_contract_address(),
-                    &admin,
-                    &platform_fee,
-                );
-            }
-
+            settle_escrow_funds(&env, &record, fleet_management);
             record.status = EscrowStatus::Released;
         } else {
             let contract_balance =
@@ -956,6 +964,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn resolve_dispute_split(
         env: Env,
         caller: Address,
@@ -1018,6 +1027,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn release_holdback_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         let mut record = load_escrow(&env, delivery_id);
@@ -1036,6 +1046,8 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
         let base_fee_bps: u32 = env
+
+        let platform_fee_bps: u32 = env
             .storage()
             .instance()
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
@@ -1066,6 +1078,8 @@ impl EscrowContract {
                 &platform_fee,
             );
         }
+        let fleet_management = get_fleet_management_contract(&env);
+        settle_escrow_funds(&env, &record, fleet_management);
 
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
@@ -1093,6 +1107,7 @@ impl EscrowContract {
         load_escrow(&env, delivery_id)
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn freeze_funds(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         let dispute_contract = env
@@ -1115,6 +1130,7 @@ impl EscrowContract {
         }
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn reclaim_expired_escrow(env: Env, delivery_id: u64) {
         let mut record = load_escrow(&env, delivery_id);
         if record.status != EscrowStatus::Locked {

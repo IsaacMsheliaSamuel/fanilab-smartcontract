@@ -44,7 +44,7 @@ Use Stellar Soroban smart contract platform.
 System could be single monolithic contract or multiple specialized contracts.
 
 ### Decision
-Use 7 specialized contracts with shared types library.
+Use 6 specialized contracts with a shared types library.
 
 ### Rationale
 - Separation of concerns
@@ -308,6 +308,49 @@ Provide a read-only `get_combined_state(delivery_id)` view that fetches both rec
 - Single unified contract: Would increase contract size and reduce modularity
 - Event-based state sync: Relies on off-chain consistency which is not guaranteed
 - Optional validation: Allows silent desynchronization if not called
+
+---
+
+## ADR-011: Shared Governance Abstraction
+
+**Date**: 2026-01-15  
+**Status**: Accepted
+
+### Context
+Admin/governance models are implemented inconsistently across the six contracts: escrow_contract, delivery_contract, fleet_management_contract, and identity_reputation_contract each use a single Admin: Address pattern (with rotation support only in escrow_contract), while dispute_resolution_contract uses a multi-admin model with per-address boolean storage. This leads to different security properties and inconsistent APIs across the protocol.
+
+### Decision
+Introduce a shared `governance` module in `shared_types` that provides `AdminManager` utility functions for both single-admin and multi-admin patterns, enabling contracts to adopt consistent governance practices.
+
+### Rationale
+- **Consistency**: All contracts can share the same governance primitives with well-understood security properties
+- **Auditability**: Centralized governance logic is easier to audit and review
+- **Maintainability**: Bug fixes to governance logic benefit all contracts
+- **Flexibility**: Module supports both single-admin and multi-admin patterns
+- **Incremental migration**: Contracts can adopt the shared abstraction independently
+
+### Consequences
+**Positive**:
+- Single source of truth for governance logic
+- Consistent admin APIs across protocol
+- Easier to implement complex governance (e.g., rotation, thresholds)
+- Better auditability
+- Shared tests and documentation
+
+**Negative**:
+- Requires updating existing contracts (can be done incrementally)
+- May require version bump if breaking changes introduced
+- Adds dependency on shared_types governance module
+
+### Alternatives Considered
+- Monolithic single-contract approach: Reduces modularity and gas optimization
+- No shared abstraction: Inconsistency continues, harder to audit
+- Immutable governance patterns: Loses flexibility for future requirements
+
+### Future Work
+- Migrate all six contracts to use the shared AdminManager
+- Add threshold-based multi-sig support if needed
+- Document governance security model in GOVERNANCE.md
 
 ---
 
