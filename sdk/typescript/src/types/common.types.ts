@@ -58,10 +58,8 @@ export const ErrorCodes = {
   DeliveryNotFound: 4,
   InvalidState: 5,
   InsufficientFunds: 6,
-  EscrowLocked: 7,
   DuplicateDelivery: 8,
   ProviderNotFound: 9,
-  InvalidAddress: 10,
   ProtocolPaused: 11,
 };
 

@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `#[allow(deprecated)]` annotations for SDK 27.0.0 `env.events().publish()` API deprecation (remains functional)
 
 ### Removed
+- **BREAKING:** `FaniLabError::EscrowLocked` (discriminant 7) and `FaniLabError::InvalidAddress` (discriminant 10) — dead error variants never returned by any contract in the workspace. Off-chain code matching on these discriminant values should be updated; the numeric codes are not reused by other variants.
 - `escrow_contract::get_status` — dead stub that always returned `DeliveryStatus::Pending`. Use `get_escrow(id).status` instead.
 - Comprehensive deployment documentation
 - API reference documentation

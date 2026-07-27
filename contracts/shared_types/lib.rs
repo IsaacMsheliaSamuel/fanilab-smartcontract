@@ -18,14 +18,10 @@ pub enum FaniLabError {
     InvalidState = 5,
     /// Contract balance is too low to complete the requested transfer.
     InsufficientFunds = 6,
-    /// Escrow funds are locked and cannot be released or refunded yet.
-    EscrowLocked = 7,
     /// Delivery identifier already exists in protocol storage.
     DuplicateDelivery = 8,
     /// Provider or driver record could not be found.
     ProviderNotFound = 9,
-    /// Address argument is invalid for the requested operation.
-    InvalidAddress = 10,
     /// Protocol is paused and fund movements are halted.
     ProtocolPaused = 11,
 }
@@ -549,21 +545,35 @@ pub struct DeliveryDetails {
     pub status: DeliveryStatus,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriverProfile {
+    pub address: Address,
+    pub deliveries_completed: u32,
+    pub reputation_score: u32,
+    pub registered_at: u64,
+    pub kyc_verified: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserProfile {
+    pub address: Address,
+    pub registered_at: u64,
+}
+
 #[cfg(test)]
 mod test {
     use super::{
         delivery_key, escrow_key, CargoCategory, CargoDescriptor, DeliveryConfirmedEvent,
-        DeliveryCreatedEvent, DeliveryDisputedEvent, DeliveryId, DeliveryMetadata, DeliveryStatus,
-        DisputeRaisedEvent, DisputeResolvedEvent, DisputeResolvedPayoutEvent,
+        DeliveryCreatedEvent, DeliveryDisputedEvent, DeliveryId, DeliveryMetadata, DeliveryRecord,
+        DeliveryStatus, DisputeRaisedEvent, DisputeResolvedEvent, DisputeResolvedPayoutEvent,
         DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, DriverAssignedEvent,
-        DriverInvitedEvent, DriverRegisteredEvent, DriverRemovedEvent, EscrowFundedEvent,
-        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError, FleetRegisteredEvent,
-        FleetTreasuryUpdatedEvent, InviteAcceptedEvent, KycStatusUpdatedEvent, PartyAddresses,
-        ReputationDecreasedEvent, ReputationIncreasedEvent, StorageKey, UserRegisteredEvent,
-        EscrowRefundedEvent, EscrowReleasedEvent, EscrowRecord, EscrowState, DeliveryRecord,
+        DriverInvitedEvent, DriverProfile, DriverRegisteredEvent, DriverRemovedEvent,
+        EscrowFundedEvent, EscrowRecord, EscrowRefundedEvent, EscrowReleasedEvent, EscrowState,
         FaniLabError, FleetRegisteredEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
         KycStatusUpdatedEvent, PartyAddresses, ProtocolConfig, ReputationDecreasedEvent,
-        ReputationIncreasedEvent, StorageKey, UserRegisteredEvent,
+        ReputationIncreasedEvent, StorageKey, UserProfile, UserRegisteredEvent,
     };
     use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
@@ -647,11 +657,6 @@ mod test {
     }
 
     #[test]
-    fn escrow_locked_has_expected_discriminant() {
-        assert_eq!(FaniLabError::EscrowLocked as u32, 7);
-    }
-
-    #[test]
     fn duplicate_delivery_has_expected_discriminant() {
         assert_eq!(FaniLabError::DuplicateDelivery as u32, 8);
     }
@@ -659,11 +664,6 @@ mod test {
     #[test]
     fn provider_not_found_has_expected_discriminant() {
         assert_eq!(FaniLabError::ProviderNotFound as u32, 9);
-    }
-
-    #[test]
-    fn invalid_address_has_expected_discriminant() {
-        assert_eq!(FaniLabError::InvalidAddress as u32, 10);
     }
 
     #[test]
@@ -901,22 +901,38 @@ mod test {
         assert_eq!(record.disputed_at, Some(7500000));
         assert_eq!(record.fleet_id, Some(42));
     }
-}
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DriverProfile {
-    pub address: Address,
-    pub deliveries_completed: u32,
-    pub reputation_score: u32,
-    pub registered_at: u64,
-    pub kyc_verified: bool,
-}
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UserProfile {
-    pub address: Address,
-    pub registered_at: u64,
+    #[test]
+    fn driver_profile_preserves_fields() {
+        let env = Env::default();
+        let address = Address::generate(&env);
+        let profile = DriverProfile {
+            address: address.clone(),
+            deliveries_completed: 12,
+            reputation_score: 85,
+            registered_at: 1000000,
+            kyc_verified: true,
+        };
+
+        assert_eq!(profile.address, address);
+        assert_eq!(profile.deliveries_completed, 12);
+        assert_eq!(profile.reputation_score, 85);
+        assert_eq!(profile.registered_at, 1000000);
+        assert_eq!(profile.kyc_verified, true);
+    }
+
+    #[test]
+    fn user_profile_preserves_fields() {
+        let env = Env::default();
+        let address = Address::generate(&env);
+        let profile = UserProfile {
+            address: address.clone(),
+            registered_at: 2000000,
+        };
+
+        assert_eq!(profile.address, address);
+        assert_eq!(profile.registered_at, 2000000);
+    }
 }
 
 #[contracttype]
