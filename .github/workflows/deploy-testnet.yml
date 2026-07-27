@@ -68,6 +68,6 @@ jobs:
       with:
         name: deployment-info
         path: |
+          contract-ids-*.json
           deployment-*.json
-          contract-ids.txt
 
