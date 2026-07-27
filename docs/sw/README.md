@@ -291,7 +291,7 @@ FaniLab-SmartContract/
 
 4. **Simu mkataba:**
    ```bash
-   ./scripts/initialize-contract.sh <CONTRACT_ID>
+   ./scripts/initialize-contract.sh escrow_contract
    ```
 
 ## 🔑 Tofauti za Mazingira

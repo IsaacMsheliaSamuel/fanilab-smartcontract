@@ -29,6 +29,81 @@
       },
       "args": [],
       "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug delivery_contract tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "-p",
+          "delivery_contract"
+        ]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug dispute_resolution_contract tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "-p",
+          "dispute_resolution_contract"
+        ]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug fleet_management_contract tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "-p",
+          "fleet_management_contract"
+        ]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug identity_reputation_contract tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "-p",
+          "identity_reputation_contract"
+        ]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug settlement_contract tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "-p",
+          "settlement_contract"
+        ]
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
     }
   ]
 }

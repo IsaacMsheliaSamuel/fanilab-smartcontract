@@ -312,7 +312,7 @@ fanilab-smartcontract/
 
 4. **Initialize the contract:**
    ```bash
-   ./scripts/initialize-contract.sh <CONTRACT_ID>
+   ./scripts/initialize-contract.sh escrow_contract
    ```
 
 ## 🔑 Environment Variables

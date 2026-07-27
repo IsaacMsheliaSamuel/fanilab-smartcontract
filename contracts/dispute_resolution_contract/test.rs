@@ -226,7 +226,7 @@ fn test_admin_whitelist_management() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_unauthorized_add_admin_fails() {
     let (env, _, sender, _, _, _, _, dispute_client) = setup_test();
     let attacker = sender;
@@ -322,7 +322,7 @@ fn test_raise_dispute_delivered_within_time_limit() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #5)")] // SwiftChainError::InvalidState
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
 fn test_raise_dispute_delivered_exceeds_time_limit() {
     let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
         setup_test();
@@ -401,7 +401,7 @@ fn test_resolve_dispute_refund_sender_by_admin() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_unauthorized_resolve_dispute_fails() {
     let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
         setup_test();
@@ -464,7 +464,7 @@ fn test_add_evidence_hash_success() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_add_evidence_unauthorized_fails() {
     let (env, _admin, sender, recipient, _driver, delivery_id, _escrow_id, dispute_client) =
         setup_test();
@@ -615,7 +615,7 @@ fn test_resolve_dispute_pay_driver_by_admin() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_unauthorized_resolve_pay_driver_fails() {
     let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
         setup_test();
@@ -658,12 +658,12 @@ fn test_dispute_reputation_penalty_configurable() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_unauthorized_set_dispute_reputation_penalty_fails() {
     let (_env, _admin, sender, _, _, _, _, dispute_client) = setup_test();
 
     dispute_client.set_dispute_reputation_penalty(&sender, &25);
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // SwiftChainError::Unauthorized
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_unauthorized_resolve_split_funds_fails() {
     let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
         setup_test();

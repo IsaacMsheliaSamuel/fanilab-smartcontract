@@ -1,5 +1,5 @@
 {
-  "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
+  "rust-analyzer.cargo.target": "wasm32v1-none",
   "rust-analyzer.checkOnSave.allTargets": false,
   "rust-analyzer.check.allTargets": false,
   "editor.formatOnSave": true,
