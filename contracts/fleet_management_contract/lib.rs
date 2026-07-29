@@ -2,8 +2,8 @@
 
 use shared_types::{
     events, ttl, DriverInvitedEvent, DriverRemovedEvent, FleetDeactivatedEvent,
-    FleetRegisteredEvent, FleetTreasuryChangeProposedEvent, FleetTreasuryUpdatedEvent,
-    InviteAcceptedEvent,
+    FleetOwnerReassignedEvent, FleetRegisteredEvent, FleetTreasuryChangeProposedEvent,
+    FleetTreasuryForceUpdatedEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal,
@@ -95,6 +95,22 @@ pub enum DataKey {
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
+/// Returns `true` when `caller` matches the admin stored under
+/// `DataKey::Admin` in instance storage.  Returns `false` — rather than
+/// panicking — when the contract has not yet been initialised, mirroring
+/// `shared_types::is_admin`'s consistent pre-init behaviour (issue #68).
+fn is_fleet_admin(env: &Env, caller: &Address) -> bool {
+    if let Some(admin) = env
+        .storage()
+        .instance()
+        .get::<DataKey, Address>(&DataKey::Admin)
+    {
+        admin == *caller
+    } else {
+        false
+    }
+}
+
 #[contract]
 pub struct FleetManagementContract;
 
@@ -118,12 +134,7 @@ impl FleetManagementContract {
     /// for the fleet owner via a cross-contract call.
     pub fn set_identity_contract(env: Env, admin: Address, identity_contract: Address) {
         admin.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, FleetError::NotInitialized));
-        if admin != stored_admin {
+        if !is_fleet_admin(&env, &admin) {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
         env.storage()
@@ -239,10 +250,7 @@ impl FleetManagementContract {
             .get(&fleet_key)
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        let admin: Option<Address> = env.storage().instance().get(&DataKey::Admin);
-        let is_admin = admin.map_or(false, |a| a == caller);
-
-        if profile.owner != caller && !is_admin {
+        if profile.owner != caller && !is_fleet_admin(&env, &caller) {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 
@@ -260,10 +268,138 @@ impl FleetManagementContract {
         );
     }
 
+    // ── Issue #69 — admin override / recovery ─────────────────────────────────
+
+    /// Reassign the owner of a fleet without the current owner's cooperation.
+    ///
+    /// This is an emergency recovery path for when a fleet owner's key is
+    /// lost or compromised.  Only the contract admin may call this.  The
+    /// function emits a dedicated `fleet_owner_reassigned` event so that the
+    /// change is auditable on-chain and distinguishable from normal owner
+    /// transfers (which do not yet exist).
+    ///
+    /// Side effects:
+    /// - `profile.owner` is updated to `new_owner`.
+    /// - `profile.signers` is reset to `[new_owner]` with threshold 1, so the
+    ///   new owner has immediate unilateral control.  If the fleet used a
+    ///   multi-sig configuration the admin (or the new owner) can restore it
+    ///   via `configure_signers` after recovery.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn admin_reassign_fleet_owner(
+        env: Env,
+        admin: Address,
+        fleet_id: FleetId,
+        new_owner: Address,
+    ) {
+        admin.require_auth();
+
+        if !is_fleet_admin(&env, &admin) {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+
+        let fleet_key = DataKey::Fleet(fleet_id);
+        let mut profile: FleetProfile = env
+            .storage()
+            .persistent()
+            .get(&fleet_key)
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        let old_owner = profile.owner.clone();
+
+        profile.owner = new_owner.clone();
+        // Reset signers to the new owner with threshold 1 so they have
+        // immediate unilateral control; the multi-sig config can be
+        // re-established via configure_signers once the situation is resolved.
+        let mut new_signers = soroban_sdk::Vec::new(&env);
+        new_signers.push_back(new_owner.clone());
+        profile.signers = new_signers;
+        profile.signature_threshold = 1;
+
+        env.storage().persistent().set(&fleet_key, &profile);
+        env.storage().persistent().extend_ttl(
+            &fleet_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        env.events().publish(
+            (events::fleet_owner_reassigned(&env),),
+            FleetOwnerReassignedEvent {
+                fleet_id,
+                admin,
+                old_owner,
+                new_owner,
+            },
+        );
+    }
+
+    /// Force-update a fleet's treasury address without the fleet owner's
+    /// cooperation and without waiting for a timelock to expire.
+    ///
+    /// This is an emergency path for when a fleet treasury key is compromised
+    /// and active driver payouts need to be redirected immediately.  Only the
+    /// contract admin may call this.  The function emits a dedicated
+    /// `fleet_treasury_force_updated` event, distinguishable from both
+    /// owner-initiated proposals (`fleet_treasury_change_proposed`) and
+    /// owner-initiated confirmations (`fleet_treasury_updated`), so that
+    /// off-chain monitors can distinguish emergency admin overrides from normal
+    /// treasury updates.
+    ///
+    /// If there is a pending owner-initiated treasury change in progress it is
+    /// cleared, preventing it from overwriting the admin-set address after
+    /// the emergency is resolved.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn admin_force_update_treasury(
+        env: Env,
+        admin: Address,
+        fleet_id: FleetId,
+        new_treasury: Address,
+    ) {
+        admin.require_auth();
+
+        if !is_fleet_admin(&env, &admin) {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+
+        let fleet_key = DataKey::Fleet(fleet_id);
+        let mut profile: FleetProfile = env
+            .storage()
+            .persistent()
+            .get(&fleet_key)
+            .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
+
+        let old_treasury = profile.treasury.clone();
+        profile.treasury = new_treasury.clone();
+
+        env.storage().persistent().set(&fleet_key, &profile);
+        env.storage().persistent().extend_ttl(
+            &fleet_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        // Discard any in-progress owner-initiated pending change to prevent
+        // it from overwriting this emergency update once its timelock expires.
+        let pending_key = DataKey::PendingTreasury(fleet_id);
+        if env.storage().persistent().has(&pending_key) {
+            env.storage().persistent().remove(&pending_key);
+        }
+
+        env.events().publish(
+            (events::fleet_treasury_force_updated(&env),),
+            FleetTreasuryForceUpdatedEvent {
+                fleet_id,
+                admin,
+                old_treasury,
+                new_treasury,
+            },
+        );
+    }
+
     /// Update the treasury wallet for an existing fleet.
     /// Requires signatures from threshold signers to authorize (multi-sig support).
-    pub fn update_fleet_treasury(env: Env, owner: Address, fleet_id: FleetId, treasury: Address) {
-        let mut profile: FleetProfile = env
+    pub fn update_fleet_treasury_old_stub_removed(env: Env, _owner: Address, _fleet_id: FleetId, _treasury: Address) {
+        let mut _profile: FleetProfile = env
     // ── Issue #70 — treasury change timelock ──────────────────────────────────
 
     /// Propose a new treasury wallet for an existing fleet.  Only the fleet

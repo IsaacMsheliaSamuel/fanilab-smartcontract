@@ -107,6 +107,18 @@ pub mod events {
         Symbol::new(env, "fleet_deactivated")
     }
 
+    /// Emitted when the contract admin reassigns a fleet's owner address
+    /// (e.g. after the original owner key is lost or compromised).
+    pub fn fleet_owner_reassigned(env: &Env) -> Symbol {
+        Symbol::new(env, "fleet_owner_reassigned")
+    }
+
+    /// Emitted when the contract admin force-updates a fleet's treasury
+    /// address, bypassing the normal owner-initiated timelock flow.
+    pub fn fleet_treasury_force_updated(env: &Env) -> Symbol {
+        Symbol::new(env, "fleet_treasury_force_updated")
+    }
+
     // Dispute resolution events
     pub fn dispute_raised(env: &Env) -> Symbol {
         Symbol::new(env, "dispute_raised")
@@ -318,6 +330,36 @@ pub struct FleetDeactivatedEvent {
     pub caller: Address,
 }
 
+/// Emitted by `admin_reassign_fleet_owner` — admin-initiated ownership
+/// transfer when the original owner key is lost or compromised.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetOwnerReassignedEvent {
+    /// Fleet whose ownership was reassigned.
+    pub fleet_id: u64,
+    /// Admin address that performed the reassignment.
+    pub admin: Address,
+    /// Previous owner address that was replaced.
+    pub old_owner: Address,
+    /// New owner address that was assigned.
+    pub new_owner: Address,
+}
+
+/// Emitted by `admin_force_update_treasury` — admin-initiated treasury
+/// override that bypasses the owner-initiated timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetTreasuryForceUpdatedEvent {
+    /// Fleet whose treasury was forcibly updated.
+    pub fleet_id: u64,
+    /// Admin address that performed the override.
+    pub admin: Address,
+    /// Previous treasury address.
+    pub old_treasury: Address,
+    /// New treasury address.
+    pub new_treasury: Address,
+}
+
 // ── Dispute resolution event payloads ────────────────────────────────────────
 
 #[contracttype]
@@ -521,6 +563,25 @@ pub fn escrow_key(id: impl Into<DeliveryId>) -> StorageKey {
     StorageKey::Escrow(id.into())
 }
 
+/// Returns `true` when `caller` matches the admin stored under
+/// `StorageKey::Admin` in **instance** storage.
+///
+/// Returns `false` — rather than panicking — when the contract has not yet
+/// been initialised.  This is intentional: both `escrow_contract` and
+/// `delivery_contract` share this single source-of-truth so the pre-init
+/// behaviour is always consistent (ADR-003).
+pub fn is_admin(env: &soroban_sdk::Env, caller: &soroban_sdk::Address) -> bool {
+    if let Some(admin) = env
+        .storage()
+        .instance()
+        .get::<_, soroban_sdk::Address>(&StorageKey::Admin)
+    {
+        admin == *caller
+    } else {
+        false
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowRecord {
@@ -578,7 +639,40 @@ mod test {
     use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
     #[test]
-    fn delivery_id_wraps_raw_u64() {
+    fn is_admin_returns_false_before_init() {
+        // Verify that is_admin returns false (not panics) when called before
+        // the contract has been initialised — i.e. when StorageKey::Admin is
+        // absent from instance storage.  This test pins the pre-init
+        // behaviour so both escrow_contract and delivery_contract are
+        // consistent (issue #68).
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        // StorageKey::Admin was never written — is_admin must return false.
+        let result = super::is_admin(&env, &caller);
+        assert!(!result, "is_admin should return false when uninitialized");
+    }
+
+    #[test]
+    fn is_admin_returns_true_for_matching_admin() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        // Manually store the admin as the contract would during `init`.
+        env.storage()
+            .instance()
+            .set(&StorageKey::Admin, &admin);
+        assert!(super::is_admin(&env, &admin));
+    }
+
+    #[test]
+    fn is_admin_returns_false_for_non_admin() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let other = Address::generate(&env);
+        env.storage()
+            .instance()
+            .set(&StorageKey::Admin, &admin);
+        assert!(!super::is_admin(&env, &other));
+    }
         let delivery_id = DeliveryId::new(42);
 
         assert_eq!(delivery_id, 42);
