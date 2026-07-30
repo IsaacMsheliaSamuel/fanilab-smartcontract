@@ -2,8 +2,8 @@
 
 use shared_types::FaniLabError;
 use shared_types::{
-    delivery_key, events, ttl, DeliveryCreatedEvent, DeliveryConfirmedEvent, DeliveryDisputedEvent,
-    DriverAssignedEvent, DeliveryMetadata, DriverProfile, StorageKey,
+    delivery_key, events, is_admin, ttl, DeliveryConfirmedEvent, DeliveryCreatedEvent,
+    DeliveryDisputedEvent, DeliveryMetadata, DriverAssignedEvent, DriverProfile, StorageKey,
 };
 pub use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus};
 use soroban_sdk::{
@@ -446,10 +446,10 @@ impl DeliveryContract {
     pub fn assign_driver(env: Env, caller: Address, delivery_id: DeliveryId, driver: Address) {
         caller.require_auth();
 
-        let is_admin = Self::is_admin(&env, &caller);
+        let is_caller_admin = is_admin(&env, &caller);
         let is_self_assignment = caller == driver;
 
-        if !is_admin && !is_self_assignment {
+        if !is_caller_admin && !is_self_assignment {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
@@ -664,18 +664,6 @@ impl DeliveryContract {
                 timestamp,
             },
         );
-    }
-
-    fn is_admin(env: &Env, caller: &Address) -> bool {
-        if let Some(admin) = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&StorageKey::Admin)
-        {
-            admin == *caller
-        } else {
-            false
-        }
     }
 
     pub fn get_driver_profile(env: Env, driver: Address) -> DriverProfile {
