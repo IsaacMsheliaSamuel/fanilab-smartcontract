@@ -55,11 +55,7 @@ mod constants {
 ///   Delivered → Disputed
 ///   Disputed  → Delivered (only via dispute resolution)
 ///   Cancelled → (terminal, no transitions)
-///   Pending   â†’ Active, Cancelled
-///   Active    â†’ InTransit, Disputed, Cancelled
-///   InTransit â†’ Delivered, Disputed
-///   Disputed  â†’ Delivered, Cancelled
-///   Delivered, Cancelled â†’ (terminal, no transitions)
+///   Delivered → (terminal, no further transitions)
 pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(), FaniLabError> {
     let valid = match (from, to) {
         (DeliveryStatus::Pending, DeliveryStatus::Active) => true,

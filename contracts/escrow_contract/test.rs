@@ -301,6 +301,39 @@ fn test_refund_from_paused_state_by_admin_allowed() {
     assert_eq!(client.get_escrow(&7u64).status, EscrowStatus::Refunded);
 }
 
+/// Regression test for Issue #93 (FA-2): before this fix, a sender could
+/// raise a dispute and then immediately self-refund via refund_escrow,
+/// bypassing admin/dispute_resolution_contract entirely. Only an admin may
+/// now refund a Paused (disputed) escrow.
+#[test]
+fn test_sender_cannot_self_refund_disputed_escrow() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 300);
+
+    client.create_escrow(&sender, &recipient, &driver, &910u64, &token, &300, &None);
+    client.raise_dispute(&sender, &910u64);
+
+    let result = client.try_refund_escrow(&sender, &910u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+
+    // Funds must still be locked in the contract, untouched.
+    assert_eq!(balance(&env, &token, &sender), 0);
+    assert_eq!(client.get_escrow(&910u64).status, EscrowStatus::Paused);
+}
+
 #[test]
 fn test_release_from_paused_state_rejected_with_invalid_state() {
     let (env, contract_id) = setup_env();

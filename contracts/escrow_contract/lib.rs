@@ -920,7 +920,16 @@ impl EscrowContract {
         let mut record = load_escrow(&env, delivery_id);
         let admin_authorized = is_admin(&env, &caller);
         let sender_authorized = caller == record.sender;
-        if !admin_authorized && !sender_authorized {
+        // A Paused escrow is under active dispute: only an admin may refund
+        // it, via this typed-error path (mirroring resolve_dispute's own
+        // admin gate). Letting the sender self-refund here would bypass
+        // dispute resolution entirely and let them race the outcome the
+        // admin/dispute_resolution_contract is meant to decide (Issue #93).
+        if record.status == EscrowStatus::Paused {
+            if !admin_authorized {
+                panic_with_error!(&env, FaniLabError::Unauthorized);
+            }
+        } else if !admin_authorized && !sender_authorized {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         if record.status != EscrowStatus::Locked
