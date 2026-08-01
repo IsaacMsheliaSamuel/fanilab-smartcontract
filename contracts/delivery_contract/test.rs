@@ -1079,6 +1079,70 @@ fn test_update_delivery_metadata_while_pending() {
     assert_eq!(updated_delivery.metadata.cargo_description.fragile, true);
 }
 
+// ── DeliveryMetadata.delivery_id cross-check (Issue #45) ───────────────────
+
+#[test]
+fn test_create_delivery_overwrites_caller_supplied_delivery_id() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+
+    // Caller supplies a delivery_id (999) that has nothing to do with the
+    // real, internally generated ID the counter will assign.
+    let metadata = get_test_metadata(&env, 999);
+    let real_delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    let stored = client.get_delivery(&real_delivery_id);
+    assert_eq!(stored.metadata.delivery_id, u64::from(real_delivery_id));
+    assert_ne!(stored.metadata.delivery_id, 999);
+}
+
+#[test]
+fn test_create_deliveries_batch_overwrites_caller_supplied_delivery_ids() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    // Both entries claim the same bogus caller-supplied ID.
+    metadata_list.push_back(get_test_metadata(&env, 4242));
+    metadata_list.push_back(get_test_metadata(&env, 4242));
+
+    let ids = client.create_deliveries_batch(&shipper, &recipient, &metadata_list);
+    for i in 0..ids.len() {
+        let id = ids.get(i).unwrap();
+        let stored = client.get_delivery(&id);
+        assert_eq!(stored.metadata.delivery_id, u64::from(id));
+        assert_ne!(stored.metadata.delivery_id, 4242);
+    }
+}
+
+#[test]
+fn test_update_delivery_metadata_overwrites_caller_supplied_delivery_id() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    use shared_types::{CargoCategory, CargoDescriptor};
+    let updated_metadata = DeliveryMetadata {
+        delivery_id: 777, // bogus, unrelated to the real delivery_id
+        origin: String::from_str(&env, "New Origin"),
+        destination: String::from_str(&env, "New Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 500,
+            category: CargoCategory::Electronics,
+            fragile: true,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 172800,
+    };
+
+    client.update_delivery_metadata(&shipper, &delivery_id, &updated_metadata);
+
+    let stored = client.get_delivery(&delivery_id);
+    assert_eq!(stored.metadata.delivery_id, u64::from(delivery_id));
+    assert_ne!(stored.metadata.delivery_id, 777);
+}
+
 #[test]
 #[should_panic(expected = "5")]
 fn test_reject_update_metadata_after_driver_assigned() {

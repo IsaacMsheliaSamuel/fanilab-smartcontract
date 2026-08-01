@@ -177,6 +177,13 @@ impl DeliveryContract {
 
         let delivery_id = DeliveryId::from(counter);
 
+        // The caller-supplied metadata.delivery_id is never authoritative -
+        // overwrite it with the internally generated ID so the two can never
+        // diverge (Issue #45), without removing the field from the public
+        // DeliveryMetadata struct.
+        let mut metadata = metadata;
+        metadata.delivery_id = counter;
+
         let record = DeliveryRecord {
             delivery_id,
             sender: sender.clone(),
@@ -297,13 +304,16 @@ impl DeliveryContract {
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
 
         for i in 0..metadata_list.len() {
-            if let Some(metadata) = metadata_list.get(i) {
+            if let Some(mut metadata) = metadata_list.get(i) {
                 counter += 1;
                 env.storage()
                     .persistent()
                     .set(&DataKey::DeliveryCounter, &counter);
 
                 let delivery_id = DeliveryId::from(counter);
+                // See create_delivery: overwrite with the real generated ID
+                // rather than trusting the caller-supplied value (Issue #45).
+                metadata.delivery_id = counter;
 
                 let record = DeliveryRecord {
                     delivery_id,
@@ -386,6 +396,10 @@ impl DeliveryContract {
         validate_delivery_metadata(&env, &metadata)
             .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
 
+        // See create_delivery: overwrite with the real, already-assigned ID
+        // rather than trusting the caller-supplied value (Issue #45).
+        let mut metadata = metadata;
+        metadata.delivery_id = delivery_id.into();
         delivery.metadata = metadata;
 
         env.storage().persistent().set(&key, &delivery);

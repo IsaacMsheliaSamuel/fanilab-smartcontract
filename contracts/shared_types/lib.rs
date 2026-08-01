@@ -1029,6 +1029,11 @@ pub struct CargoDescriptor {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveryMetadata {
+    /// Not caller-authoritative: `delivery_contract` overwrites this with
+    /// the internally generated `DeliveryId` on every create/update call,
+    /// discarding whatever value the caller supplied. Kept as a field
+    /// (rather than removed) so a `DeliveryMetadata` read back from storage
+    /// is self-describing without a second lookup.
     pub delivery_id: u64,
     pub origin: String,
     pub destination: String,
