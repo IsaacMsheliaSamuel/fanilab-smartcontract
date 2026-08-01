@@ -514,6 +514,60 @@ fn test_add_evidence_unauthorized_fails() {
 }
 
 #[test]
+fn test_add_evidence_hash_up_to_cap_succeeds() {
+    let (env, _admin, sender, recipient, _driver, delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(8),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(8), &delivery_record);
+
+    dispute_client.raise_dispute(&sender, &did(8));
+
+    for i in 0..MAX_EVIDENCE_HASHES {
+        let hash = soroban_sdk::BytesN::from_array(&env, &[i as u8; 32]);
+        dispute_client.add_evidence_hash(&sender, &did(8), &hash);
+    }
+
+    let case = dispute_client.get_dispute(&did(8));
+    assert_eq!(case.evidence_hashes.len(), MAX_EVIDENCE_HASHES);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #12)")] // FaniLabError::LimitExceeded
+fn test_add_evidence_hash_beyond_cap_rejected() {
+    let (env, _admin, sender, recipient, _driver, delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(9),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(9), &delivery_record);
+
+    dispute_client.raise_dispute(&sender, &did(9));
+
+    for i in 0..MAX_EVIDENCE_HASHES {
+        let hash = soroban_sdk::BytesN::from_array(&env, &[i as u8; 32]);
+        dispute_client.add_evidence_hash(&sender, &did(9), &hash);
+    }
+
+    // One past the cap must be rejected.
+    let one_too_many = soroban_sdk::BytesN::from_array(&env, &[0xFF; 32]);
+    dispute_client.add_evidence_hash(&sender, &did(9), &one_too_many);
+}
+
+#[test]
 fn test_integration_resolve_dispute_split_funds() {
     let env = Env::default();
     env.mock_all_auths();

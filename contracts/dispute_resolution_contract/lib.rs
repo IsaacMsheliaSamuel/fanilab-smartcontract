@@ -14,6 +14,10 @@ const DEFAULT_DISPUTE_REPUTATION_PENALTY: u32 = 10;
 const DISPUTE_REPUTATION_REWARD: u32 = 5;
 const DISPUTE_REPUTATION_SPLIT_PENALTY: u32 = 5;
 const MIN_DISPUTE_TIME_LIMIT: u64 = 86400; // 1 day in seconds
+/// Maximum number of evidence hashes a single dispute may accumulate.
+/// Without a cap, add_evidence_hash lets any party grow one storage entry
+/// without bound, inflating that entry's rent/TTL-extension cost indefinitely.
+const MAX_EVIDENCE_HASHES: u32 = 20;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -373,6 +377,10 @@ impl DisputeResolutionContract {
             && Some(caller.clone()) != delivery.driver
         {
             panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+
+        if dispute.evidence_hashes.len() >= MAX_EVIDENCE_HASHES {
+            panic_with_error!(&env, FaniLabError::LimitExceeded);
         }
 
         dispute.evidence_hashes.push_back(evidence_hash.clone());

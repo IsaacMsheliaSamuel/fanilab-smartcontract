@@ -24,6 +24,9 @@ pub enum FaniLabError {
     ProviderNotFound = 9,
     /// Protocol is paused and fund movements are halted.
     ProtocolPaused = 11,
+    /// Requested operation would exceed a fixed capacity/growth limit
+    /// (e.g. a bounded collection is already at its maximum length).
+    LimitExceeded = 12,
 }
 
 // Event topic constants for on-chain event tracking

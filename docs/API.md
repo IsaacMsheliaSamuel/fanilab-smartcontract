@@ -1753,6 +1753,7 @@ pub enum FaniLabError {
     DuplicateDelivery = 8,      // Delivery ID exists
     ProviderNotFound = 9,       // Driver not found
     ProtocolPaused = 11,        // Protocol paused, fund movements halted
+    LimitExceeded = 12,         // A bounded collection is already at its max length
 }
 ```
 
@@ -1803,6 +1804,7 @@ pair in one place.
 | 8 | `DuplicateDelivery` | Delivery identifier already exists in protocol storage. |
 | 9 | `ProviderNotFound` | Provider or driver record could not be found. |
 | 11 | `ProtocolPaused` | Protocol is paused and fund movements are halted. |
+| 12 | `LimitExceeded` | Requested operation would exceed a fixed capacity/growth limit (e.g. `add_evidence_hash` once a dispute already holds the maximum of 20 evidence hashes). |
 
 #### `EscrowError` — `escrow_contract`
 | Code | Variant | Meaning |
