@@ -74,14 +74,19 @@ pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(
     }
 }
 
-fn validate_delivery_metadata(env: &Env, metadata: &DeliveryMetadata) -> Result<(), DeliveryError> {
+fn validate_delivery_metadata(
+    _env: &Env,
+    metadata: &DeliveryMetadata,
+) -> Result<(), DeliveryError> {
     if metadata.origin.len() == 0 || metadata.origin.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
     if metadata.destination.len() == 0 || metadata.destination.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
-    if metadata.cargo_description.weight_grams == 0 || metadata.cargo_description.weight_grams > constants::MAX_WEIGHT_GRAMS {
+    if metadata.cargo_description.weight_grams == 0
+        || metadata.cargo_description.weight_grams > constants::MAX_WEIGHT_GRAMS
+    {
         return Err(DeliveryError::InvalidMetadata);
     }
     Ok(())
@@ -111,11 +116,7 @@ impl DeliveryContract {
         );
     }
 
-    pub fn set_identity_reputation_contract(
-        env: Env,
-        admin: Address,
-        identity_contract: Address,
-    ) {
+    pub fn set_identity_reputation_contract(env: Env, admin: Address, identity_contract: Address) {
         admin.require_auth();
         let stored_admin: Address = env
             .storage()
@@ -150,12 +151,12 @@ impl DeliveryContract {
 
         if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
             use soroban_sdk::IntoVal;
-            let _: Result<(), _> = env.invoke_contract(
+            let _: shared_types::UserProfile = env.invoke_contract(
                 &identity_contract,
                 &Symbol::new(&env, "register_user"),
                 soroban_sdk::vec![&env, sender.clone().into_val(&env)],
             );
-            let _: Result<(), _> = env.invoke_contract(
+            let _: shared_types::UserProfile = env.invoke_contract(
                 &identity_contract,
                 &Symbol::new(&env, "register_user"),
                 soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
@@ -257,12 +258,12 @@ impl DeliveryContract {
 
         if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
             use soroban_sdk::IntoVal;
-            let _: Result<(), _> = env.invoke_contract(
+            let _: shared_types::UserProfile = env.invoke_contract(
                 &identity_contract,
                 &Symbol::new(&env, "register_user"),
                 soroban_sdk::vec![&env, sender.clone().into_val(&env)],
             );
-            let _: Result<(), _> = env.invoke_contract(
+            let _: shared_types::UserProfile = env.invoke_contract(
                 &identity_contract,
                 &Symbol::new(&env, "register_user"),
                 soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
@@ -394,6 +395,7 @@ impl DeliveryContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn cancel_delivery(env: Env, sender: Address, delivery_id: DeliveryId) {
         sender.require_auth();
 
@@ -436,10 +438,8 @@ impl DeliveryContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        env.events().publish(
-            (events::delivery_cancelled(&env),),
-            (delivery_id, sender),
-        );
+        env.events()
+            .publish((events::delivery_cancelled(&env),), (delivery_id, sender));
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
@@ -715,10 +715,7 @@ impl DeliveryContract {
 
     /// Validates that delivery and escrow states match expected protocol invariants.
     /// Returns true if states are synchronized, false if a mismatch is detected.
-    fn validate_state_sync(
-        delivery: &DeliveryRecord,
-        escrow: &shared_types::EscrowRecord,
-    ) -> bool {
+    fn validate_state_sync(delivery: &DeliveryRecord, escrow: &shared_types::EscrowRecord) -> bool {
         match (&delivery.status, &escrow.status) {
             // Pending/Active: escrow should be Locked
             (DeliveryStatus::Pending, shared_types::EscrowStatus::Locked) => true,
@@ -751,7 +748,10 @@ impl DeliveryContract {
     }
 
     /// Get all delivery IDs with a specific recipient.
-    pub fn get_deliveries_by_recipient(env: Env, recipient: Address) -> soroban_sdk::Vec<DeliveryId> {
+    pub fn get_deliveries_by_recipient(
+        env: Env,
+        recipient: Address,
+    ) -> soroban_sdk::Vec<DeliveryId> {
         let key = DataKey::DeliveriesByRecipient(recipient);
         env.storage()
             .persistent()

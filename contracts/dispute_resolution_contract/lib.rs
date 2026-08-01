@@ -2,7 +2,8 @@
 
 use shared_types::{
     events, ttl, DeliveryId, DeliveryStatus, DisputeRaisedEvent, DisputeResolvedPayoutEvent,
-    DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, EscrowRecord, EscrowStatus, FaniLabError,
+    DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, EscrowRecord, EscrowStatus,
+    FaniLabError,
 };
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, Address, BytesN, Env, IntoVal, Symbol,
@@ -10,7 +11,6 @@ use soroban_sdk::{
 };
 
 const DEFAULT_DISPUTE_REPUTATION_PENALTY: u32 = 10;
-const DISPUTE_REPUTATION_PENALTY: u32 = 10;
 const DISPUTE_REPUTATION_REWARD: u32 = 5;
 const DISPUTE_REPUTATION_SPLIT_PENALTY: u32 = 5;
 const MIN_DISPUTE_TIME_LIMIT: u64 = 86400; // 1 day in seconds
@@ -81,11 +81,15 @@ impl DisputeResolutionContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeResolutionLimit, &dispute_resolution_limit);
-        env.storage().instance().set(&DataKey::Admin(admin.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin(admin.clone()), &true);
 
         let mut admin_list = Vec::new(&env);
         admin_list.push_back(admin);
-        env.storage().instance().set(&DataKey::AdminList, &admin_list);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminList, &admin_list);
     }
 
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) {
@@ -105,7 +109,9 @@ impl DisputeResolutionContract {
 
         if !admin_list.iter().any(|a| a == new_admin) {
             admin_list.push_back(new_admin);
-            env.storage().instance().set(&DataKey::AdminList, &admin_list);
+            env.storage()
+                .instance()
+                .set(&DataKey::AdminList, &admin_list);
         }
     }
 
@@ -114,9 +120,11 @@ impl DisputeResolutionContract {
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
-        env.storage().instance().remove(&DataKey::Admin(old_admin.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::Admin(old_admin.clone()));
 
-        let mut admin_list: Vec<Address> = env
+        let admin_list: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::AdminList)
@@ -202,6 +210,8 @@ impl DisputeResolutionContract {
             .instance()
             .get(&DataKey::DisputeReputationPenalty)
             .unwrap_or(DEFAULT_DISPUTE_REPUTATION_PENALTY)
+    }
+
     pub fn get_dispute_resolution_limit(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -209,9 +219,7 @@ impl DisputeResolutionContract {
             .unwrap_or(0)
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn set_dispute_resolution_limit(env: Env, caller: Address, new_limit: u64) {
-    pub fn update_dispute_time_limit(env: Env, caller: Address, new_limit: u64) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
@@ -219,6 +227,16 @@ impl DisputeResolutionContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeResolutionLimit, &new_limit);
+    }
+
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn update_dispute_time_limit(env: Env, caller: Address, new_limit: u64) {
+        caller.require_auth();
+        if !Self::is_admin(env.clone(), caller.clone()) {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
             .set(&DataKey::DisputeTimeLimit, &new_limit);
         env.events().publish(
             (Symbol::new(&env, "dispute_time_limit_updated"),),
@@ -238,7 +256,10 @@ impl DisputeResolutionContract {
         );
 
         // Verify the caller is sender, recipient, or driver
-        if caller != delivery.sender && caller != delivery.recipient && Some(caller.clone()) != delivery.driver {
+        if caller != delivery.sender
+            && caller != delivery.recipient
+            && Some(caller.clone()) != delivery.driver
+        {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
@@ -340,7 +361,10 @@ impl DisputeResolutionContract {
             soroban_sdk::vec![&env, delivery_id.into_val(&env)],
         );
 
-        if caller != delivery.sender && caller != delivery.recipient && Some(caller.clone()) != delivery.driver {
+        if caller != delivery.sender
+            && caller != delivery.recipient
+            && Some(caller.clone()) != delivery.driver
+        {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
@@ -430,14 +454,12 @@ impl DisputeResolutionContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "dispute_resolved_refund"), delivery_id),
-            (caller, delivery_id, driver, penalty),
             (events::dispute_resolved_refund(&env), delivery_id),
             DisputeResolvedRefundEvent {
                 delivery_id: u64::from(delivery_id),
                 caller,
                 driver,
-                penalty: DISPUTE_REPUTATION_PENALTY,
+                penalty,
             },
         );
     }

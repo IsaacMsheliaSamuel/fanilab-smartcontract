@@ -1,12 +1,10 @@
 #![no_std]
 
 use shared_types::{
-    events, ttl, DriverRegisteredEvent, KycStatusUpdatedEvent, ReputationDecreasedEvent,
-    ReputationIncreasedEvent, UserRegisteredEvent, FaniLabError,
+    events, ttl, DriverRegisteredEvent, FaniLabError, KycStatusUpdatedEvent,
+    ReputationDecreasedEvent, ReputationIncreasedEvent, UserRegisteredEvent,
 };
 use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
-use shared_types::{DriverProfile, FaniLabError};
-use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env, Symbol};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -57,7 +55,6 @@ const MAX_REPUTATION: u32 = 100;
 const GOLD_TIER_THRESHOLD: u32 = 75;
 // Enterprise eligibility is intentionally tied to reaching the Gold tier.
 const ENTERPRISE_THRESHOLD: u32 = GOLD_TIER_THRESHOLD;
-const ENTERPRISE_THRESHOLD: u32 = 75;
 const HEAVY_CARGO_GRAMS: u32 = 5000;
 const DEFAULT_BASE_POINTS: u32 = 5;
 const DEFAULT_HEAVY_CARGO_POINTS: u32 = 3;
@@ -68,12 +65,7 @@ pub struct IdentityReputationContract;
 
 #[contractimpl]
 impl IdentityReputationContract {
-    pub fn init(
-        env: Env,
-        admin: Address,
-        delivery_contract: Address,
-        dispute_contract: Address,
-    ) {
+    pub fn init(env: Env, admin: Address, delivery_contract: Address, dispute_contract: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
         }
@@ -117,7 +109,6 @@ impl IdentityReputationContract {
     }
 
     pub fn set_reputation_config(env: Env, admin: Address, config: ReputationConfig) {
-    pub fn set_delivery_contract(env: Env, admin: Address, delivery_contract: Address) {
         admin.require_auth();
         let stored_admin = Self::get_admin(env.clone());
         if admin != stored_admin {
@@ -137,6 +128,16 @@ impl IdentityReputationContract {
                 heavy_cargo_points: DEFAULT_HEAVY_CARGO_POINTS,
                 fragile_points: DEFAULT_FRAGILE_POINTS,
             })
+    }
+
+    pub fn set_delivery_contract(env: Env, admin: Address, delivery_contract: Address) {
+        admin.require_auth();
+        let stored_admin = Self::get_admin(env.clone());
+        if admin != stored_admin {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
             .set(&DataKey::DeliveryContract, &delivery_contract);
     }
 
@@ -172,7 +173,10 @@ impl IdentityReputationContract {
 
     pub fn has_driver_profile(env: Env, driver: Address) -> bool {
         let key = DataKey::DriverProfile(driver);
-        env.storage().persistent().get::<_, DriverProfile>(&key).is_some()
+        env.storage()
+            .persistent()
+            .get::<_, DriverProfile>(&key)
+            .is_some()
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
@@ -198,8 +202,10 @@ impl IdentityReputationContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        env.events()
-            .publish((events::driver_registered(&env),), DriverRegisteredEvent { driver });
+        env.events().publish(
+            (events::driver_registered(&env),),
+            DriverRegisteredEvent { driver },
+        );
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
@@ -225,8 +231,10 @@ impl IdentityReputationContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        env.events()
-            .publish((events::user_registered(&env),), UserRegisteredEvent { user });
+        env.events().publish(
+            (events::user_registered(&env),),
+            UserRegisteredEvent { user },
+        );
 
         profile
     }
@@ -283,7 +291,10 @@ impl IdentityReputationContract {
 
         env.events().publish(
             (events::kyc_status_updated(&env),),
-            KycStatusUpdatedEvent { driver, kyc_verified },
+            KycStatusUpdatedEvent {
+                driver,
+                kyc_verified,
+            },
         );
     }
 

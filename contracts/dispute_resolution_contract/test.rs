@@ -1,5 +1,5 @@
 use super::*;
-use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus, EscrowRecord, EscrowStatus};
+use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
@@ -106,8 +106,8 @@ fn setup_test() -> (
 
     let dispute_client = DisputeResolutionContractClient::new(&env, &dispute_id);
 
-    // Time limit: 1 hour (3600 seconds)
-    dispute_client.init(&admin, &delivery_id, &escrow_id, &3600);
+    // Time limit: 1 day (86400 seconds) — MIN_DISPUTE_TIME_LIMIT
+    dispute_client.init(&admin, &delivery_id, &escrow_id, &86400, &604800);
 
     (
         env,
@@ -194,8 +194,10 @@ fn create_mock_escrow_record(
         amount: 500,
         status,
         created_at: 0,
+        expires_at: None,
         disputed_by: None,
         disputed_at: None,
+        fleet_id: None,
     }
 }
 
@@ -205,7 +207,7 @@ fn test_init_and_setup() {
 
     assert_eq!(dispute_client.get_delivery_contract(), delivery_id);
     assert_eq!(dispute_client.get_escrow_contract(), escrow_id);
-    assert_eq!(dispute_client.get_dispute_time_limit(), 3600);
+    assert_eq!(dispute_client.get_dispute_time_limit(), 86400);
     assert!(dispute_client.is_admin(&admin));
 }
 
@@ -350,8 +352,8 @@ fn test_raise_dispute_delivered_exceeds_time_limit() {
     );
     set_mock_escrow(&env, &escrow_id, 3, &escrow_record);
 
-    // Set time forward by 3601 seconds (exceeding 3600 limit)
-    env.ledger().set_timestamp(delivered_at + 3601);
+    // Set time forward past the 86400s (MIN_DISPUTE_TIME_LIMIT) configured in setup_test
+    env.ledger().set_timestamp(delivered_at + 86401);
 
     // Attempt to raise dispute (should fail due to time limit exceeded)
     dispute_client.raise_dispute(&recipient, &did(3));
@@ -514,8 +516,15 @@ fn test_integration_resolve_dispute_split_funds() {
 
     // Init contracts
     escrow_client.init(&admin, &token, &0);
+    escrow_client.set_dispute_resolution_contract(&admin, &dispute_resolution_id);
     delivery_client.init(&admin, &escrow_contract_id);
-    dispute_client.init(&admin, &delivery_contract_id, &escrow_contract_id, &3600);
+    dispute_client.init(
+        &admin,
+        &delivery_contract_id,
+        &escrow_contract_id,
+        &86400,
+        &604800,
+    );
 
     // Mint tokens to sender
     StellarAssetClient::new(&env, &token).mint(&sender, &1000);
@@ -546,6 +555,7 @@ fn test_integration_resolve_dispute_split_funds() {
         &u64::from(delivery_id_val),
         &token,
         &1000,
+        &None,
     );
 
     // Assign driver to make delivery Active
@@ -663,10 +673,16 @@ fn test_unauthorized_set_dispute_reputation_penalty_fails() {
     let (_env, _admin, sender, _, _, _, _, dispute_client) = setup_test();
 
     dispute_client.set_dispute_reputation_penalty(&sender, &25);
+}
+
+#[test]
 #[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_unauthorized_resolve_split_funds_fails() {
-    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+    let (_env, _admin, sender, _recipient, _driver, _delivery_id, _escrow_id, dispute_client) =
         setup_test();
+
+    dispute_client.resolve_dispute_split_funds(&sender, &did(10), &5000);
+}
 
 // ── DISPUTE TIME LIMIT VALIDATION (Issue #21) ────────────────────────────────
 
@@ -684,7 +700,7 @@ fn test_init_with_zero_dispute_time_limit() {
     let dispute_client = DisputeResolutionContractClient::new(&env, &dispute_id);
 
     // Attempt to init with dispute_time_limit = 0 (should fail)
-    dispute_client.init(&admin, &delivery_id, &escrow_id, &0);
+    dispute_client.init(&admin, &delivery_id, &escrow_id, &0, &604800);
 }
 
 #[test]
@@ -701,7 +717,7 @@ fn test_init_with_below_minimum_dispute_time_limit() {
     let dispute_client = DisputeResolutionContractClient::new(&env, &dispute_id);
 
     // Attempt to init with dispute_time_limit below minimum (should fail)
-    dispute_client.init(&admin, &delivery_id, &escrow_id, &1000);
+    dispute_client.init(&admin, &delivery_id, &escrow_id, &1000, &604800);
 }
 
 #[test]
@@ -717,7 +733,7 @@ fn test_init_with_minimum_dispute_time_limit() {
     let dispute_client = DisputeResolutionContractClient::new(&env, &dispute_id);
 
     // Init with minimum dispute_time_limit should succeed
-    dispute_client.init(&admin, &delivery_id, &escrow_id, &86400);
+    dispute_client.init(&admin, &delivery_id, &escrow_id, &86400, &604800);
 
     let limit = dispute_client.get_dispute_time_limit();
     assert_eq!(limit, 86400);
@@ -747,16 +763,20 @@ fn test_split_resolve_with_non_paused_escrow_fails() {
         sender.clone(),
         recipient.clone(),
         DeliveryStatus::Active,
-        DeliveryStatus::Disputed,
         None,
     );
     set_mock_delivery(&env, &delivery_id, did(10), &delivery_record);
 
-    // Raise dispute to create the dispute case
+    // Raise dispute to create the dispute case (this also pauses the mock
+    // escrow via freeze_funds, so reset it back to Locked afterward to
+    // exercise the non-Paused guard in resolve_dispute_split_funds).
     dispute_client.raise_dispute(&sender, &did(10));
+    set_mock_escrow(&env, &escrow_id, 10, &escrow_record);
 
     // Attempt to split-resolve with non-Paused escrow should fail loudly
     dispute_client.resolve_dispute_split_funds(&admin, &did(10), &5000);
+}
+
 #[test]
 fn test_post_delivery_dispute_can_be_raised_and_resolved() {
     let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
@@ -781,15 +801,6 @@ fn test_post_delivery_dispute_can_be_raised_and_resolved() {
         sender.clone(),
         recipient.clone(),
         driver.clone(),
-        token,
-        shared_types::EscrowStatus::Paused,
-    );
-    set_mock_escrow(&env, &escrow_id, 10, &escrow_record);
-
-    dispute_client.raise_dispute(&sender, &did(10));
-
-    // Attacker (sender) tries to resolve dispute with a fund split
-    dispute_client.resolve_dispute_split_funds(&sender, &did(10), &6000);
         token.clone(),
         shared_types::EscrowStatus::Holdback,
     );
@@ -822,7 +833,7 @@ fn test_post_delivery_dispute_can_be_raised_and_resolved() {
 
 #[test]
 fn test_list_admins_returns_initial_admin() {
-    let (env, admin, _sender, _recipient, _driver, _delivery_id, _escrow_id, dispute_client) =
+    let (_env, admin, _sender, _recipient, _driver, _delivery_id, _escrow_id, dispute_client) =
         setup_test();
 
     let admins = dispute_client.list_admins();

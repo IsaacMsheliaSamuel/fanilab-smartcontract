@@ -263,6 +263,12 @@ fn test_set_reputation_config_unauthorized() {
             fragile_points: 0,
         },
     );
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected non-admin caller to fail with Unauthorized"),
+    }
+}
+
 // Cross-contract wiring updates
 
 #[test]
@@ -275,6 +281,11 @@ fn test_admin_can_repoint_cross_contracts() {
     let new_dispute_contract = Address::generate(&env);
     client.set_delivery_contract(&admin, &new_delivery_contract);
     client.set_dispute_contract(&admin, &new_dispute_contract);
+    // Repointing the canonical addresses doesn't implicitly authorize them —
+    // the allowlist is a separate, explicitly-managed mechanism (see init's
+    // comment on why it exists) so they must be authorized here too.
+    client.set_authorized_contract(&admin, &new_delivery_contract, &true);
+    client.set_authorized_contract(&admin, &new_dispute_contract, &true);
 
     assert_eq!(client.get_delivery_contract(), new_delivery_contract);
     assert_eq!(client.get_dispute_contract(), new_dispute_contract);
@@ -286,8 +297,6 @@ fn test_admin_can_repoint_cross_contracts() {
     assert_eq!(profile.reputation_score, 53);
 }
 
-#[test]
-fn test_repointed_contract_rejects_old_address() {
 // ── AuthorizedContract allowlist tests ──────────────────────────────────────
 
 /// is_authorized_contract returns true for the two contracts registered by
@@ -339,6 +348,9 @@ fn test_deauthorized_caller_is_rejected() {
 
     let new_delivery_contract = Address::generate(&env);
     client.set_delivery_contract(&admin, &new_delivery_contract);
+    // Repointing alone doesn't revoke the old address — the allowlist is
+    // managed explicitly, so the supersession must be done here too.
+    client.set_authorized_contract(&admin, &delivery_contract, &false);
 
     let result =
         client.try_increase_reputation(&delivery_contract, &driver, &1u64, &1000u32, &false);
@@ -364,6 +376,15 @@ fn test_set_cross_contracts_unauthorized() {
     match result {
         Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
         _ => panic!("Expected non-admin caller to fail with Unauthorized"),
+    }
+}
+
+#[test]
+fn test_deauthorized_delivery_contract_rejected_for_reputation_calls() {
+    let (env, admin, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
     // Confirm delivery_contract is currently authorized and can call.
     client.increase_reputation(&delivery_contract, &driver, &1u64, &1000u32, &false);
 
@@ -427,6 +448,9 @@ fn test_unauthorized_caller_cannot_decrease_reputation() {
     match result {
         Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
         _ => panic!("Expected unauthorized decrease_reputation to fail with Unauthorized"),
+    }
+}
+
 #[test]
 fn test_init_already_initialized_rejected() {
     let env = Env::default();

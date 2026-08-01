@@ -396,10 +396,6 @@ impl FleetManagementContract {
         );
     }
 
-    /// Update the treasury wallet for an existing fleet.
-    /// Requires signatures from threshold signers to authorize (multi-sig support).
-    pub fn update_fleet_treasury_old_stub_removed(env: Env, _owner: Address, _fleet_id: FleetId, _treasury: Address) {
-        let mut _profile: FleetProfile = env
     // ── Issue #70 — treasury change timelock ──────────────────────────────────
 
     /// Propose a new treasury wallet for an existing fleet.  Only the fleet
@@ -418,8 +414,6 @@ impl FleetManagementContract {
             .persistent()
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
-
-        owner.require_auth();
 
         let mut authorized_signer_count = 0u32;
         for i in 0..profile.signers.len() {
@@ -667,6 +661,7 @@ impl FleetManagementContract {
         match status {
             DriverFleetStatus::Active => panic_with_error!(&env, FleetError::DriverAlreadyActive),
             DriverFleetStatus::Pending => {}
+            DriverFleetStatus::Removed => panic_with_error!(&env, FleetError::InviteNotFound),
         }
 
         // Promote driver to active.
@@ -790,7 +785,7 @@ impl FleetManagementContract {
 
         // Remove driver from fleet roster.
         let roster_key = DataKey::FleetRoster(fleet_id);
-        if let Some(mut roster) = env
+        if let Some(roster) = env
             .storage()
             .persistent()
             .get::<_, soroban_sdk::Vec<Address>>(&roster_key)
@@ -877,6 +872,7 @@ impl FleetManagementContract {
     /// Configure multi-signature requirements for a fleet.
     /// Only the fleet owner may call this. Sets the authorized signers and
     /// signature threshold for treasury and driver removal actions.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn configure_signers(
         env: Env,
         owner: Address,

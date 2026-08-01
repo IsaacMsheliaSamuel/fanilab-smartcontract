@@ -32,7 +32,7 @@ impl SettlementContract {
     /// Phase 3 implementation is complete. This is intentional to prevent silent
     /// no-op swaps on mainnet with unimplemented settlement logic.
     pub fn execute_settlement_swap(
-        env: Env,
+        _env: Env,
         caller: Address,
         _from_token: Address,
         _to_token: Address,

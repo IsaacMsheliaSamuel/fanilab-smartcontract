@@ -628,15 +628,18 @@ mod test {
     use super::{
         delivery_key, escrow_key, CargoCategory, CargoDescriptor, DeliveryConfirmedEvent,
         DeliveryCreatedEvent, DeliveryDisputedEvent, DeliveryId, DeliveryMetadata, DeliveryRecord,
-        DeliveryStatus, DisputeRaisedEvent, DisputeResolvedEvent, DisputeResolvedPayoutEvent,
-        DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, DriverAssignedEvent,
-        DriverInvitedEvent, DriverProfile, DriverRegisteredEvent, DriverRemovedEvent,
-        EscrowFundedEvent, EscrowRecord, EscrowRefundedEvent, EscrowReleasedEvent, EscrowState,
-        FaniLabError, FleetRegisteredEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
-        KycStatusUpdatedEvent, PartyAddresses, ProtocolConfig, ReputationDecreasedEvent,
-        ReputationIncreasedEvent, StorageKey, UserProfile, UserRegisteredEvent,
+        DeliveryStatus, DriverAssignedEvent, DriverProfile, EscrowFundedEvent, EscrowRecord,
+        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError, PartyAddresses,
+        ProtocolConfig, StorageKey, UserProfile,
     };
-    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    use soroban_sdk::{contract, testutils::Address as _, Address, Env, String};
+
+    // `is_admin` is a free function reading instance storage, which SDK 27
+    // only allows from within a contract's execution context — this minimal
+    // contract exists solely to give these unit tests one to run inside via
+    // `env.as_contract(...)`.
+    #[contract]
+    struct TestContract;
 
     #[test]
     fn is_admin_returns_false_before_init() {
@@ -646,33 +649,39 @@ mod test {
         // behaviour so both escrow_contract and delivery_contract are
         // consistent (issue #68).
         let env = Env::default();
+        let contract_id = env.register(TestContract, ());
         let caller = Address::generate(&env);
         // StorageKey::Admin was never written — is_admin must return false.
-        let result = super::is_admin(&env, &caller);
+        let result = env.as_contract(&contract_id, || super::is_admin(&env, &caller));
         assert!(!result, "is_admin should return false when uninitialized");
     }
 
     #[test]
     fn is_admin_returns_true_for_matching_admin() {
         let env = Env::default();
+        let contract_id = env.register(TestContract, ());
         let admin = Address::generate(&env);
         // Manually store the admin as the contract would during `init`.
-        env.storage()
-            .instance()
-            .set(&StorageKey::Admin, &admin);
-        assert!(super::is_admin(&env, &admin));
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&StorageKey::Admin, &admin);
+        });
+        assert!(env.as_contract(&contract_id, || super::is_admin(&env, &admin)));
     }
 
     #[test]
     fn is_admin_returns_false_for_non_admin() {
         let env = Env::default();
+        let contract_id = env.register(TestContract, ());
         let admin = Address::generate(&env);
         let other = Address::generate(&env);
-        env.storage()
-            .instance()
-            .set(&StorageKey::Admin, &admin);
-        assert!(!super::is_admin(&env, &other));
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&StorageKey::Admin, &admin);
+        });
+        assert!(!env.as_contract(&contract_id, || super::is_admin(&env, &other)));
     }
+
+    #[test]
+    fn delivery_id_wraps_raw_u64() {
         let delivery_id = DeliveryId::new(42);
 
         assert_eq!(delivery_id, 42);
@@ -1059,7 +1068,7 @@ pub struct DeliveryMetadata {
 }
 
 pub mod governance {
-    use soroban_sdk::{Address, Env, Vec};
+    use soroban_sdk::{contracttype, Address, Env, Vec};
 
     #[contracttype]
     #[derive(Clone)]
@@ -1107,11 +1116,7 @@ pub mod governance {
             }
         }
 
-        pub fn remove_admin_from_set(
-            env: &Env,
-            old_admin: Address,
-            storage_key: &AdminDataKey,
-        ) {
+        pub fn remove_admin_from_set(env: &Env, old_admin: Address, storage_key: &AdminDataKey) {
             let admins: Vec<Address> = env
                 .storage()
                 .instance()

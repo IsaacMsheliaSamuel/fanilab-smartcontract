@@ -1,8 +1,8 @@
 #![no_std]
 
 use shared_types::{
-    escrow_key, events, ttl, DeliveryStatus, EscrowRecord, EscrowStatus, FaniLabError,
-    ProtocolConfig, StorageKey, is_admin,
+    escrow_key, events, is_admin, ttl, EscrowRecord, EscrowStatus, FaniLabError, ProtocolConfig,
+    StorageKey,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, Env,
@@ -58,10 +58,8 @@ fn calculate_fee(amount: i128, platform_fee_bps: u32) -> i128 {
 }
 
 fn get_effective_fee_bps(env: &Env, base_fee_bps: u32, sender_volume: u32) -> u32 {
-    let tiers: Option<soroban_sdk::Vec<VolumeTier>> = env
-        .storage()
-        .persistent()
-        .get(&DataKey::VolumeTiers);
+    let tiers: Option<soroban_sdk::Vec<VolumeTier>> =
+        env.storage().persistent().get(&DataKey::VolumeTiers);
 
     if let Some(tier_list) = tiers {
         for i in (0..tier_list.len()).rev() {
@@ -81,7 +79,9 @@ fn get_settlement_contract(env: &Env) -> Option<Address> {
 }
 
 fn get_fleet_management_contract(env: &Env) -> Option<Address> {
-    env.storage().instance().get(&DataKey::FleetManagementContract)
+    env.storage()
+        .instance()
+        .get(&DataKey::FleetManagementContract)
 }
 
 fn payout_driver(
@@ -117,7 +117,8 @@ fn payout_driver(
         if let Some(preferred_asset) = preferred_asset {
             if preferred_asset != token.clone() {
                 let slippage_tolerance_bps: u32 = load_protocol_config(env).slippage_tolerance_bps;
-                let min_amount_out = amount.saturating_mul(10000 - slippage_tolerance_bps as i128) / 10000;
+                let min_amount_out =
+                    amount.saturating_mul(10000 - slippage_tolerance_bps as i128) / 10000;
                 let _: () = env.invoke_contract(
                     &settlement_addr,
                     &Symbol::new(env, "execute_settlement_swap"),
@@ -136,14 +137,14 @@ fn payout_driver(
         }
     }
 
-    token::Client::new(env, token).transfer(&env.current_contract_address(), &payout_address, &amount);
+    token::Client::new(env, token).transfer(
+        &env.current_contract_address(),
+        &payout_address,
+        &amount,
+    );
 }
 
-fn settle_escrow_funds(
-    env: &Env,
-    record: &EscrowRecord,
-    fleet_management_addr: Option<Address>,
-) {
+fn settle_escrow_funds(env: &Env, record: &EscrowRecord, fleet_management_addr: Option<Address>) {
     let platform_fee_bps: u32 = env
         .storage()
         .instance()
@@ -233,7 +234,7 @@ pub enum EscrowError {
     DuplicateDelivery = 4,
     InvalidFee = 5,
     InvalidToken = 6,
-    InvalidAmount = 6,
+    InvalidAmount = 7,
 }
 
 #[contracttype]
@@ -300,10 +301,9 @@ impl EscrowContract {
             },
         );
 
-        env.storage().instance().extend_ttl(
-            ttl::LEDGER_TTL_THRESHOLD,
-            ttl::LEDGER_TTL_EXTEND_TO,
-        );
+        env.storage()
+            .instance()
+            .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
@@ -332,10 +332,9 @@ impl EscrowContract {
             },
         );
 
-        env.storage().instance().extend_ttl(
-            ttl::LEDGER_TTL_THRESHOLD,
-            ttl::LEDGER_TTL_EXTEND_TO,
-        );
+        env.storage()
+            .instance()
+            .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
     }
 
     pub fn get_platform_fee(env: Env) -> u32 {
@@ -388,9 +387,9 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::SettlementContract, &settlement_contract);
 
-        env.storage().instance().extend_ttl(
-            ttl::LEDGER_TTL_THRESHOLD,
-            ttl::LEDGER_TTL_EXTEND_TO,
+        env.storage()
+            .instance()
+            .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
         env.events().publish(
             (Symbol::new(&env, "SettlementContractUpdated"),),
             SettlementContractUpdated {
@@ -404,12 +403,16 @@ impl EscrowContract {
         get_settlement_contract(&env)
     }
 
+    // Issue #90: allow an admin to unset a previously configured settlement_contract.
+    pub fn clear_settlement_contract(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::SettlementContract);
+    }
+
     pub fn set_fleet_management_contract(env: Env, admin: Address, fleet_contract: Address) {
-    pub fn set_dispute_resolution_contract(
-        env: Env,
-        admin: Address,
-        dispute_contract: Address,
-    ) {
         admin.require_auth();
         require_admin(&env, &admin);
         env.storage()
@@ -419,6 +422,13 @@ impl EscrowContract {
 
     pub fn get_fleet_management_contract(env: Env) -> Option<Address> {
         get_fleet_management_contract(&env)
+    }
+
+    pub fn set_dispute_resolution_contract(env: Env, admin: Address, dispute_contract: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
             .set(&DataKey::DisputeResolutionContract, &dispute_contract);
     }
 
@@ -436,15 +446,14 @@ impl EscrowContract {
             .get(&StorageKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
         if stored_admin != current_admin {
-            panic!("caller is not the admin");
+            panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
-        env.storage().instance().extend_ttl(
-            ttl::LEDGER_TTL_THRESHOLD,
-            ttl::LEDGER_TTL_EXTEND_TO,
-        );
+        env.storage()
+            .instance()
+            .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
@@ -454,9 +463,9 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::PendingAdmin)
-            .expect("no pending admin");
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::InvalidState));
         if pending != new_admin {
-            panic!("caller is not the pending admin");
+            panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         let old_admin: Address = env
             .storage()
@@ -465,10 +474,9 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
         env.storage().instance().set(&StorageKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.storage().instance().extend_ttl(
-            ttl::LEDGER_TTL_THRESHOLD,
-            ttl::LEDGER_TTL_EXTEND_TO,
-        );
+        env.storage()
+            .instance()
+            .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
         env.events().publish(
             (Symbol::new(&env, "AdminTransferred"),),
             (old_admin, new_admin),
@@ -548,13 +556,11 @@ impl EscrowContract {
             .get(&sender_key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
         sender_escrows.push_back(delivery_id);
-        env.storage()
-            .persistent()
-            .set(&sender_key, &sender_escrows);
+        env.storage().persistent().set(&sender_key, &sender_escrows);
         env.storage().persistent().extend_ttl(
             &sender_key,
-            constants::ESCROW_TTL_THRESHOLD,
-            constants::ESCROW_TTL_EXTEND_TO,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
         );
 
         let recipient_key = DataKey::EscrowsByRecipient(recipient.clone());
@@ -569,8 +575,8 @@ impl EscrowContract {
             .set(&recipient_key, &recipient_escrows);
         env.storage().persistent().extend_ttl(
             &recipient_key,
-            constants::ESCROW_TTL_THRESHOLD,
-            constants::ESCROW_TTL_EXTEND_TO,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
         );
 
         let driver_key = DataKey::EscrowsByDriver(driver.clone());
@@ -580,13 +586,11 @@ impl EscrowContract {
             .get(&driver_key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
         driver_escrows.push_back(delivery_id);
-        env.storage()
-            .persistent()
-            .set(&driver_key, &driver_escrows);
+        env.storage().persistent().set(&driver_key, &driver_escrows);
         env.storage().persistent().extend_ttl(
             &driver_key,
-            constants::ESCROW_TTL_THRESHOLD,
-            constants::ESCROW_TTL_EXTEND_TO,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
         );
 
         let token_for_tracking = record_token_clone.clone();
@@ -643,7 +647,8 @@ impl EscrowContract {
             .get(&recipient_key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
 
-        let mut driver_indexes = soroban_sdk::Map::new(&env);
+        let mut driver_indexes: soroban_sdk::Map<DataKey, soroban_sdk::Vec<u64>> =
+            soroban_sdk::Map::new(&env);
 
         let mut count = 0u32;
         for i in 0..escrow_list.len() {
@@ -656,6 +661,9 @@ impl EscrowContract {
                     &env.current_contract_address(),
                     &amount,
                 );
+                let created_at = env.ledger().timestamp();
+                let expires_at =
+                    created_at.saturating_add(constants::DEFAULT_ESCROW_EXPIRY_SECONDS);
                 save_escrow(
                     &env,
                     delivery_id,
@@ -666,9 +674,11 @@ impl EscrowContract {
                         token: token.clone(),
                         amount,
                         status: EscrowStatus::Locked,
-                        created_at: env.ledger().timestamp(),
+                        created_at,
+                        expires_at: Some(expires_at),
                         disputed_by: None,
                         disputed_at: None,
+                        fleet_id: None,
                     },
                 );
                 sender_escrows.push_back(delivery_id);
@@ -676,15 +686,15 @@ impl EscrowContract {
 
                 // Track drivers separately for efficient index updates.
                 let driver_key = DataKey::EscrowsByDriver(driver.clone());
-                if !driver_indexes.contains_key(&driver_key) {
+                if !driver_indexes.contains_key(driver_key.clone()) {
                     let existing: soroban_sdk::Vec<u64> = env
                         .storage()
                         .persistent()
                         .get(&driver_key)
                         .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
-                    driver_indexes.set(driver_key, existing);
+                    driver_indexes.set(driver_key.clone(), existing);
                 }
-                if let Some(mut driver_escrows_vec) = driver_indexes.get(&driver_key) {
+                if let Some(mut driver_escrows_vec) = driver_indexes.get(driver_key.clone()) {
                     driver_escrows_vec.push_back(delivery_id);
                     driver_indexes.set(driver_key, driver_escrows_vec);
                 }
@@ -698,13 +708,11 @@ impl EscrowContract {
         }
 
         // Save all updated indexes.
-        env.storage()
-            .persistent()
-            .set(&sender_key, &sender_escrows);
+        env.storage().persistent().set(&sender_key, &sender_escrows);
         env.storage().persistent().extend_ttl(
             &sender_key,
-            constants::ESCROW_TTL_THRESHOLD,
-            constants::ESCROW_TTL_EXTEND_TO,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
         );
 
         env.storage()
@@ -712,24 +720,24 @@ impl EscrowContract {
             .set(&recipient_key, &recipient_escrows);
         env.storage().persistent().extend_ttl(
             &recipient_key,
-            constants::ESCROW_TTL_THRESHOLD,
-            constants::ESCROW_TTL_EXTEND_TO,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        for i in 0..driver_indexes.len() {
-            if let Some((driver_key, driver_escrows_vec)) = driver_indexes.get_index(i) {
-                env.storage()
-                    .persistent()
-                    .set(&driver_key, &driver_escrows_vec);
-                env.storage().persistent().extend_ttl(
-                    &driver_key,
-                    constants::ESCROW_TTL_THRESHOLD,
-                    constants::ESCROW_TTL_EXTEND_TO,
-                );
-            }
+        for (driver_key, driver_escrows_vec) in driver_indexes.iter() {
+            env.storage()
+                .persistent()
+                .set(&driver_key, &driver_escrows_vec);
+            env.storage().persistent().extend_ttl(
+                &driver_key,
+                ttl::LEDGER_TTL_THRESHOLD,
+                ttl::LEDGER_TTL_EXTEND_TO,
+            );
         }
 
         count
+    }
+
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn mark_holdback_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
@@ -770,7 +778,6 @@ impl EscrowContract {
         }
 
         let base_fee_bps: u32 = env
-        let platform_fee_bps: u32 = env
             .storage()
             .instance()
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
@@ -799,9 +806,10 @@ impl EscrowContract {
             .persistent()
             .get(&total_locked_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_sub(record.amount),
+        );
 
         env.events().publish(
             (events::escrow_released(&env),),
@@ -850,9 +858,10 @@ impl EscrowContract {
             .persistent()
             .get(&total_locked_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_sub(record.amount),
+        );
 
         env.events().publish(
             (events::escrow_refunded(&env),),
@@ -868,7 +877,7 @@ impl EscrowContract {
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         let mut record = load_escrow(&env, delivery_id);
-        if caller != record.sender && caller != record.recipient && Some(caller.clone()) != record.driver {
+        if caller != record.sender && caller != record.recipient && caller != record.driver {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         if record.status != EscrowStatus::Locked {
@@ -909,7 +918,7 @@ impl EscrowContract {
             let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
             let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
             let platform_fee = calculate_fee(record.amount, effective_fee_bps);
-            let driver_amount = record.amount.saturating_sub(platform_fee);
+            let _driver_amount = record.amount.saturating_sub(platform_fee);
 
             let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
             env.storage()
@@ -941,9 +950,10 @@ impl EscrowContract {
             .persistent()
             .get(&total_locked_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_sub(record.amount),
+        );
 
         env.events().publish(
             (events::dispute_resolved(&env),),
@@ -1004,9 +1014,10 @@ impl EscrowContract {
             .persistent()
             .get(&total_locked_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_sub(record.amount),
+        );
 
         env.events().publish(
             (events::dispute_resolved(&env),),
@@ -1036,8 +1047,6 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
         let base_fee_bps: u32 = env
-
-        let platform_fee_bps: u32 = env
             .storage()
             .instance()
             .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
@@ -1054,20 +1063,6 @@ impl EscrowContract {
             .persistent()
             .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
-        payout_driver(&env, &record.token, &record.driver, driver_amount);
-
-        if platform_fee > 0 {
-            let admin: Address = env
-                .storage()
-                .instance()
-                .get(&StorageKey::Admin)
-                .expect("Not initialized");
-            token::Client::new(&env, &record.token).transfer(
-                &env.current_contract_address(),
-                &admin,
-                &platform_fee,
-            );
-        }
         let fleet_management = get_fleet_management_contract(&env);
         settle_escrow_funds(&env, &record, fleet_management);
 
@@ -1080,9 +1075,10 @@ impl EscrowContract {
             .persistent()
             .get(&total_locked_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_sub(record.amount),
+        );
 
         env.events().publish(
             (events::escrow_released(&env), delivery_id),
@@ -1153,9 +1149,10 @@ impl EscrowContract {
             .persistent()
             .get(&total_locked_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&total_locked_key, &current_total.saturating_sub(record.amount));
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_sub(record.amount),
+        );
 
         env.events().publish(
             (events::escrow_refunded(&env), delivery_id),
@@ -1192,18 +1189,11 @@ impl EscrowContract {
 
     pub fn get_total_locked(env: Env, token: Address) -> i128 {
         let key = DataKey::TotalLocked(token);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(0)
+        env.storage().persistent().get(&key).unwrap_or(0)
     }
 
-    pub fn sweep_untracked_balance(
-        env: Env,
-        admin: Address,
-        token: Address,
-        recipient: Address,
-    ) {
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn sweep_untracked_balance(env: Env, admin: Address, token: Address, recipient: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
 
@@ -1228,6 +1218,7 @@ impl EscrowContract {
         );
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn set_volume_tiers(env: Env, admin: Address, tiers: soroban_sdk::Vec<VolumeTier>) {
         admin.require_auth();
         require_admin(&env, &admin);
@@ -1250,10 +1241,7 @@ impl EscrowContract {
 
     pub fn get_sender_volume(env: Env, sender: Address) -> u32 {
         let key = DataKey::SenderVolume(sender);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(0)
+        env.storage().persistent().get(&key).unwrap_or(0)
     }
 }
 
