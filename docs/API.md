@@ -1290,14 +1290,16 @@ Manages on-chain driver and user profiles, KYC status, and reputation scoring.
 ### Types
 
 #### `UserProfile`
+Defined once in `shared_types` and imported here (no local redeclaration).
 ```rust
 pub struct UserProfile {
-    pub address:   Address,
-    pub join_date: u64,
+    pub address:       Address,
+    pub registered_at: u64,
 }
 ```
 
 #### `DriverProfile`
+Defined once in `shared_types` and imported here (no local redeclaration).
 ```rust
 pub struct DriverProfile {
     pub address:               Address,

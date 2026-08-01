@@ -1,27 +1,10 @@
 #![no_std]
 
 use shared_types::{
-    events, ttl, DriverRegisteredEvent, FaniLabError, KycStatusUpdatedEvent,
-    ReputationDecreasedEvent, ReputationIncreasedEvent, UserRegisteredEvent,
+    events, ttl, DriverProfile, DriverRegisteredEvent, FaniLabError, KycStatusUpdatedEvent,
+    ReputationDecreasedEvent, ReputationIncreasedEvent, UserProfile, UserRegisteredEvent,
 };
 use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct UserProfile {
-    pub address: Address,
-    pub join_date: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct DriverProfile {
-    pub address: Address,
-    pub deliveries_completed: u32,
-    pub reputation_score: u32,
-    pub registered_at: u64,
-    pub kyc_verified: bool,
-}
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -212,11 +195,11 @@ impl IdentityReputationContract {
     pub fn register_user(env: Env, user: Address) -> UserProfile {
         user.require_auth();
 
-        let join_date = env.ledger().timestamp();
+        let registered_at = env.ledger().timestamp();
 
         let profile = UserProfile {
             address: user.clone(),
-            join_date,
+            registered_at,
         };
 
         let key = DataKey::UserProfile(user.clone());
