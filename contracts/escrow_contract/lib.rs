@@ -1,9 +1,8 @@
 #![no_std]
 
 use shared_types::{
-    escrow_key, events, EscrowRecord, EscrowStatus, FaniLabError, ProtocolConfig, StorageKey,
     escrow_key, events, ttl, DeliveryStatus, EscrowRecord, EscrowStatus, FaniLabError,
-    ProtocolConfig, StorageKey,
+    ProtocolConfig, StorageKey, is_admin,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, Env,
@@ -26,15 +25,6 @@ fn require_admin(env: &Env, caller: &Address) {
     if *caller != stored_admin {
         panic_with_error!(env, FaniLabError::Unauthorized);
     }
-}
-
-fn is_admin(env: &Env, caller: &Address) -> bool {
-    let stored_admin: Address = env
-        .storage()
-        .instance()
-        .get(&StorageKey::Admin)
-        .expect("Not initialized");
-    *caller == stored_admin
 }
 
 fn is_protocol_paused(env: &Env) -> bool {
