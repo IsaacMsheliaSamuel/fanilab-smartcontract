@@ -528,14 +528,6 @@ pub type EscrowStatus = EscrowState;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PartyAddresses {
-    pub sender: Address,
-    pub driver: Address,
-    pub recipient: Address,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolConfig {
     pub token: Address,
     pub platform_fee_bps: u32,
@@ -603,14 +595,6 @@ pub struct EscrowRecord {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeliveryDetails {
-    pub id: DeliveryId,
-    pub driver: String,
-    pub status: DeliveryStatus,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DriverProfile {
     pub address: Address,
     pub deliveries_completed: u32,
@@ -632,8 +616,8 @@ mod test {
         delivery_key, escrow_key, CargoCategory, CargoDescriptor, DeliveryConfirmedEvent,
         DeliveryCreatedEvent, DeliveryDisputedEvent, DeliveryId, DeliveryMetadata, DeliveryRecord,
         DeliveryStatus, DriverAssignedEvent, DriverProfile, EscrowFundedEvent, EscrowRecord,
-        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError, PartyAddresses,
-        ProtocolConfig, StorageKey, UserProfile,
+        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError, ProtocolConfig,
+        StorageKey, UserProfile,
     };
     use soroban_sdk::{contract, testutils::Address as _, Address, Env, String};
 
@@ -705,23 +689,6 @@ mod test {
         assert_eq!(EscrowState::Refunded, EscrowState::Refunded);
         assert_eq!(EscrowState::Paused, EscrowState::Paused);
         assert_eq!(EscrowState::Split, EscrowState::Split);
-    }
-
-    #[test]
-    fn party_addresses_preserve_fields() {
-        let env = Env::default();
-        let sender = Address::generate(&env);
-        let driver = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let party_addresses = PartyAddresses {
-            sender: sender.clone(),
-            driver: driver.clone(),
-            recipient: recipient.clone(),
-        };
-
-        assert_eq!(party_addresses.sender, sender);
-        assert_eq!(party_addresses.driver, driver);
-        assert_eq!(party_addresses.recipient, recipient);
     }
 
     #[test]
