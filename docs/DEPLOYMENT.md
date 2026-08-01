@@ -20,7 +20,7 @@ This guide covers the complete deployment process for FaniLab smart contracts on
 ```bash
 # Rust toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Stellar CLI (version 21.5.0 or later)
 cargo install --locked stellar-cli --version 21.5.0
@@ -99,16 +99,16 @@ stellar account balance deployer --network mainnet
 make build
 
 # Or using cargo directly
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 ```
 
 ### Optimized Build (Recommended for Mainnet)
 ```bash
 # Build with optimizations
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 
 # Optimize WASM files
-for contract in target/wasm32-unknown-unknown/release/*.wasm; do
+for contract in target/wasm32v1-none/release/*.wasm; do
     wasm-opt -Oz "$contract" -o "$contract.opt"
     mv "$contract.opt" "$contract"
 done
@@ -117,10 +117,10 @@ done
 ### Verify Build
 ```bash
 # Check WASM file sizes
-ls -lh target/wasm32-unknown-unknown/release/*.wasm
+ls -lh target/wasm32v1-none/release/*.wasm
 
 # Verify contract interfaces
-stellar contract inspect --wasm target/wasm32-unknown-unknown/release/escrow_contract.wasm
+stellar contract inspect --wasm target/wasm32v1-none/release/escrow_contract.wasm
 ```
 
 ## Testing Before Deployment
@@ -159,7 +159,7 @@ stellar network stop local
 ```bash
 # Deploy escrow contract
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/escrow_contract.wasm \
+  --wasm target/wasm32v1-none/release/escrow_contract.wasm \
   --source deployer \
   --network testnet
 
@@ -225,7 +225,7 @@ stellar contract fetch \
 
 # Compare with local build
 sha256sum deployed.wasm
-sha256sum target/wasm32-unknown-unknown/release/escrow_contract.wasm
+sha256sum target/wasm32v1-none/release/escrow_contract.wasm
 ```
 
 ## Contract Initialization
@@ -336,7 +336,7 @@ Soroban contracts are upgradeable. To rollback:
 ```bash
 # Deploy previous version
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/escrow_contract_v1.wasm \
+  --wasm target/wasm32v1-none/release/escrow_contract_v1.wasm \
   --source deployer \
   --network $STELLAR_NETWORK
 

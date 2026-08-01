@@ -75,13 +75,13 @@ jobs:
 
     - name: Check deployment scripts use wasm32v1-none
       run: |
-        echo "Scanning scripts/ for legacy wasm32-unknown-unknown target references..."
-        if grep -rn "wasm32-unknown-unknown" scripts/; then
+        echo "Scanning scripts/ and Makefile for legacy wasm32-unknown-unknown target references..."
+        if grep -rn "wasm32-unknown-unknown" scripts/ Makefile; then
           echo ""
           echo "❌ ERROR: One or more deployment scripts still reference the old"
           echo "   'wasm32-unknown-unknown' target. Soroban SDK 27+ requires"
           echo "   'wasm32v1-none'. Update all occurrences shown above."
           exit 1
         fi
-        echo "✅ No legacy wasm target references found in scripts/."
+        echo "✅ No legacy wasm target references found in scripts/ or Makefile."
 

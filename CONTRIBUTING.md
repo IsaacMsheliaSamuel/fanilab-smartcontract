@@ -36,7 +36,7 @@ You will need the following installed:
 *   **Rust**: Latest stable toolchain. `https://www.rust-lang.org/tools/install`
 *   **WASM Target**: Required for compiling Soroban contracts.
     ```bash
-    rustup target add wasm32-unknown-unknown
+    rustup target add wasm32v1-none
     ```
 *   **Stellar CLI**: For compiling, deploying, and invoking contracts.
     ```bash
@@ -61,12 +61,12 @@ make build-dispute
 **For Windows Users (or users without Make):**
 ```bash
 # Build all contracts
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 
 # Build specific contracts
-cargo build -p escrow_contract --target wasm32-unknown-unknown --release
-cargo build -p delivery_contract --target wasm32-unknown-unknown --release
-cargo build -p dispute_resolution_contract --target wasm32-unknown-unknown --release
+cargo build -p escrow_contract --target wasm32v1-none --release
+cargo build -p delivery_contract --target wasm32v1-none --release
+cargo build -p dispute_resolution_contract --target wasm32v1-none --release
 ```
 
 ## Testing Guidelines
