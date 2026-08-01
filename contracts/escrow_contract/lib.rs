@@ -598,6 +598,7 @@ impl EscrowContract {
         fleet_id: Option<u64>,
     ) {
         sender.require_auth();
+        require_not_paused(&env);
         if amount <= 0 {
             panic_with_error!(&env, EscrowError::InvalidAmount);
         }
@@ -713,6 +714,7 @@ impl EscrowContract {
         escrow_list: soroban_sdk::Vec<(u64, Address, i128)>,
     ) -> u32 {
         sender.require_auth();
+        require_not_paused(&env);
 
         if escrow_list.len() > constants::MAX_BATCH_SIZE as u32 {
             panic_with_error!(&env, EscrowError::InvalidState);
@@ -827,6 +829,7 @@ impl EscrowContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn mark_holdback_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
+        require_not_paused(&env);
         let mut record = load_escrow(&env, delivery_id);
         let recipient_authorized = caller == record.recipient;
         if !recipient_authorized {
@@ -1134,6 +1137,7 @@ impl EscrowContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn release_holdback_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
+        require_not_paused(&env);
         let mut record = load_escrow(&env, delivery_id);
         let admin_authorized = is_admin(&env, &caller);
         let recipient_authorized = caller == record.recipient;
@@ -1201,6 +1205,12 @@ impl EscrowContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn freeze_funds(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
+        // Intentionally NOT gated on require_not_paused: this only moves an
+        // escrow into the Paused (disputed) state and never transfers funds,
+        // so it remains available during a protocol pause — an admin should
+        // still be able to freeze a suspicious escrow while the protocol is
+        // paused for an unrelated incident. The caller is already restricted
+        // to the configured dispute_resolution_contract below.
         let dispute_contract = env
             .storage()
             .instance()
@@ -1223,6 +1233,7 @@ impl EscrowContract {
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn reclaim_expired_escrow(env: Env, delivery_id: u64) {
+        require_not_paused(&env);
         let mut record = load_escrow(&env, delivery_id);
         if record.status != EscrowStatus::Locked {
             panic_with_error!(&env, EscrowError::InvalidState);

@@ -162,6 +162,40 @@ Configure settlement contract for currency swaps.
 
 **Authorization:** Admin only
 
+#### `set_paused`
+Emergency circuit breaker. When paused, blocks every operation that creates a
+new escrow or moves funds out of the contract.
+
+**Parameters:**
+- `admin: Address` - Admin address
+- `paused: bool` - New pause state
+
+**Authorization:** Admin only
+
+**Blocked while paused:** `create_escrow`, `create_escrows_batch`,
+`mark_holdback_escrow`, `release_escrow`, `refund_escrow`, `resolve_dispute`,
+`resolve_dispute_split`, `release_holdback_escrow`, `reclaim_expired_escrow`
+— each panics with `ProtocolPaused` (error code 11).
+
+**Remains available while paused:** `freeze_funds` and `raise_dispute`
+(neither moves funds — both only transition an escrow into the disputed
+`Paused` state, so admins/the dispute contract can still flag a suspicious
+escrow during an incident) and `sweep_untracked_balance` (already
+restricted to admin-only, used for recovering stray token balances).
+
+**Example:**
+```rust
+escrow_contract.set_paused(&admin_address, true);  // halt fund movement
+escrow_contract.set_paused(&admin_address, false); // resume
+```
+
+#### `is_paused`
+Returns the current protocol pause state.
+
+**Parameters:** None
+
+**Returns:** `bool`
+
 ### Escrow Lifecycle
 
 #### `create_escrow`

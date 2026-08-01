@@ -1766,3 +1766,245 @@ fn test_cannot_release_already_refunded_escrow() {
 
     assert_eq!(balance(&env, &token, &sender), 2000);
 }
+
+// ── Batch FB-3: Emergency pause / circuit breaker (Issue #31) ───────────────
+
+#[test]
+fn test_set_paused_requires_admin() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let not_admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+
+    let result = client.try_set_paused(&not_admin, &true);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+    assert!(!client.is_paused());
+}
+
+#[test]
+fn test_set_paused_and_is_paused_roundtrip() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    assert!(!client.is_paused());
+
+    client.set_paused(&admin, &true);
+    assert!(client.is_paused());
+
+    client.set_paused(&admin, &false);
+    assert!(!client.is_paused());
+}
+
+/// Shared fixture: an initialized, paused protocol with one funded, Locked
+/// escrow — enough starting state for every paused-rejection test below,
+/// since `require_not_paused` fires before any function's own state or
+/// authorization checks.
+fn setup_paused_with_escrow(
+    delivery_id: u64,
+) -> (Env, Address, Address, Address, Address, Address) {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 10_000);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &token,
+        &1000,
+        &None,
+    );
+    client.set_paused(&admin, &true);
+
+    (env, contract_id, admin, sender, recipient, driver)
+}
+
+#[test]
+fn test_create_escrow_rejected_while_paused() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.set_paused(&admin, &true);
+
+    let result =
+        client.try_create_escrow(&sender, &recipient, &driver, &900u64, &token, &1000, &None);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_create_escrows_batch_rejected_while_paused() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.set_paused(&admin, &true);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((901u64, driver, 500i128));
+
+    let result = client.try_create_escrows_batch(&sender, &recipient, &token, &escrow_list);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_mark_holdback_escrow_rejected_while_paused() {
+    let (env, contract_id, _admin, _sender, recipient, _driver) = setup_paused_with_escrow(902);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_mark_holdback_escrow(&recipient, &902u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_release_holdback_escrow_rejected_while_paused() {
+    let (env, contract_id, _admin, _sender, recipient, _driver) = setup_paused_with_escrow(903);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_release_holdback_escrow(&recipient, &903u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_release_escrow_rejected_while_paused() {
+    let (env, contract_id, _admin, _sender, recipient, _driver) = setup_paused_with_escrow(904);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_release_escrow(&recipient, &904u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_refund_escrow_rejected_while_paused() {
+    let (env, contract_id, _admin, sender, _recipient, _driver) = setup_paused_with_escrow(905);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_refund_escrow(&sender, &905u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_resolve_dispute_rejected_while_paused() {
+    let (env, contract_id, admin, _sender, _recipient, _driver) = setup_paused_with_escrow(906);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_resolve_dispute(&admin, &906u64, &true);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_resolve_dispute_split_rejected_while_paused() {
+    let (env, contract_id, admin, _sender, _recipient, _driver) = setup_paused_with_escrow(907);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_resolve_dispute_split(&admin, &907u64, &5000u32);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+#[test]
+fn test_reclaim_expired_escrow_rejected_while_paused() {
+    let (env, contract_id, _admin, _sender, _recipient, _driver) = setup_paused_with_escrow(908);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // Jump time past expiry so the only remaining rejection reason would be
+    // the protocol pause, not "not yet expired".
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 31 * 24 * 60 * 60);
+
+    let result = client.try_reclaim_expired_escrow(&908u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProtocolPaused.into()),
+        _ => panic!("Expected FaniLabError::ProtocolPaused"),
+    }
+}
+
+/// Documents the intentional scope decision: freeze_funds only moves an
+/// escrow into the Paused (disputed) state and never transfers funds, so it
+/// stays available during a protocol pause — an admin-configured
+/// dispute_resolution_contract can still freeze a suspicious escrow while
+/// the protocol is paused for an unrelated incident.
+#[test]
+fn test_freeze_funds_remains_available_while_paused() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let dispute_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_dispute_resolution_contract(&admin, &dispute_contract);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(&sender, &recipient, &driver, &909u64, &token, &1000, &None);
+    client.set_paused(&admin, &true);
+
+    client.freeze_funds(&dispute_contract, &909u64);
+
+    assert_eq!(client.get_escrow(&909u64).status, EscrowStatus::Paused);
+}
