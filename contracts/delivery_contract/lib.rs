@@ -389,7 +389,11 @@ impl DeliveryContract {
         delivery.metadata = metadata;
 
         env.storage().persistent().set(&key, &delivery);
-        env.storage().persistent().extend_ttl(&key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "delivery_metadata_updated"),),

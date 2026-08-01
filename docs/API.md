@@ -1786,60 +1786,14 @@ All contract functions that can fail return Soroban errors via `panic_with_error
 ### Error Codes by Contract
 
 A raw Soroban error (`Error(Contract, #N)`) only carries a numeric code — the meaning of that
-code depends on which contract raised it. Each contract below defines its own `#[contracterror]`
-enum starting from `1`, so the same number means different things in different contracts. This
-table consolidates every error variant in the workspace, labeled by originating contract, so an
-integrator handling errors from a multi-contract call chain can look up any `(contract, code)`
-pair in one place.
+code depends on which contract raised it. Each contract defines its own `#[contracterror]`
+enum starting from `1`, so the same number means different things in different contracts.
 
-#### `FaniLabError` — shared across all contracts (`shared_types`)
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `Unauthorized` | Caller is not authorized to perform the requested action. |
-| 2 | `AlreadyInitialized` | Contract or protocol state has already been initialized. |
-| 3 | `NotInitialized` | Contract or protocol state has not been initialized yet. |
-| 4 | `DeliveryNotFound` | Delivery record or related escrow entry could not be found. |
-| 5 | `InvalidState` | Requested operation is invalid for the current protocol state. |
-| 6 | `InsufficientFunds` | Contract balance is too low to complete the requested transfer. |
-| 8 | `DuplicateDelivery` | Delivery identifier already exists in protocol storage. |
-| 9 | `ProviderNotFound` | Provider or driver record could not be found. |
-| 11 | `ProtocolPaused` | Protocol is paused and fund movements are halted. |
-| 12 | `LimitExceeded` | Requested operation would exceed a fixed capacity/growth limit (e.g. `add_evidence_hash` once a dispute already holds the maximum of 20 evidence hashes). |
-
-#### `EscrowError` — `escrow_contract`
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `InvalidState` | Requested operation is invalid for the escrow's current state. |
-| 2 | `DeliveryNotFound` | No escrow exists for the given delivery ID. |
-| 3 | `InsufficientFunds` | Escrow balance is too low to complete the requested transfer. |
-| 4 | `DuplicateDelivery` | An escrow already exists for the given delivery ID. |
-| 5 | `InvalidFee` | Requested platform fee exceeds the configured maximum. |
-| 6 | `InvalidToken` | Token does not match the protocol-configured token. |
-| 7 | `InvalidAmount` | Escrow amount is not positive. |
-| 8 | `NoPendingSettlementChange` | `confirm_settlement_contract` called with no proposal pending. |
-| 9 | `TimelockNotElapsed` | `confirm_settlement_contract` called before the proposal's timelock elapsed. |
-
-#### `DeliveryError` — `delivery_contract`
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `InvalidState` | Requested delivery status transition is not permitted. |
-| 2 | `InvalidMetadata` | Delivery metadata fails validation (e.g. location or weight limits). |
-| 3 | `BatchTooLarge` | `create_deliveries_batch` list exceeds `MAX_BATCH_SIZE` (100). |
-| 4 | `InvalidDriver` | Driver address matches the delivery's sender or recipient. |
-
-#### `FleetError` — `fleet_management_contract`
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `AlreadyInitialized` | Contract has already been initialized. |
-| 2 | `NotInitialized` | Contract has not been initialized yet. |
-| 3 | `Unauthorized` | Caller is not authorized to perform the requested action. |
-| 4 | `FleetNotFound` | No fleet exists for the given fleet ID. |
-| 5 | `DriverAlreadyInvited` | Driver already has a pending invite to this fleet. |
-| 6 | `InviteNotFound` | No pending invite exists for the given driver. |
-| 7 | `DriverAlreadyActive` | Driver is already an active member of this fleet. |
-| 8 | `NoPendingTreasuryChange` | No proposed treasury change is pending confirmation. |
-| 9 | `TimelockNotElapsed` | Proposed treasury change's timelock has not yet elapsed. |
-| 10 | `FleetInactive` | Fleet has been deactivated and no longer accepts this operation. |
+The full, canonical table of every error variant in the workspace — labeled by originating
+contract, so an integrator handling errors from a multi-contract call chain can look up any
+`(contract, code)` pair in one place — lives in **[`docs/ERROR_CODES.md`](./ERROR_CODES.md)**.
+That file is the single source of truth; update it (not this section) when error variants
+change.
 
 ---
 

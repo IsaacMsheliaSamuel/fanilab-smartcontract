@@ -779,9 +779,11 @@ impl FleetManagementContract {
         env.storage()
             .persistent()
             .set(&invite_key, &DriverFleetStatus::Removed);
-        env.storage()
-            .persistent()
-            .extend_ttl(&invite_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &invite_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Remove driver from fleet roster.
         let roster_key = DataKey::FleetRoster(fleet_id);
@@ -901,9 +903,11 @@ impl FleetManagementContract {
 
         let fleet_key = DataKey::Fleet(fleet_id);
         env.storage().persistent().set(&fleet_key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&fleet_key, 518400, 518400);
+        env.storage().persistent().extend_ttl(
+            &fleet_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "signers_configured"),),
