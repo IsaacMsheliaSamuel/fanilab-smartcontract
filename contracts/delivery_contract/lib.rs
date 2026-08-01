@@ -113,7 +113,7 @@ impl DeliveryContract {
             .set(&DataKey::DeliveryCounter, &0u64);
 
         env.events().publish(
-            (Symbol::new(&env, "DeliveryContractInitialized"),),
+            (events::delivery_contract_initialized(&env),),
             (admin, escrow_contract),
         );
     }

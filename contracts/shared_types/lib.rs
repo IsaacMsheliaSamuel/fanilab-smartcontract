@@ -163,6 +163,40 @@ pub mod events {
     pub fn reputation_decreased(env: &Env) -> Symbol {
         Symbol::new(env, "reputation_decreased")
     }
+
+    // Protocol/admin lifecycle events. These previously used raw inline
+    // Symbol::new(&env, "PascalCase") calls at each contract's call site
+    // instead of going through this module, the one place in the codebase
+    // that mixed casing conventions for event topics (Issue #47).
+    pub fn protocol_initialized(env: &Env) -> Symbol {
+        Symbol::new(env, "protocol_initialized")
+    }
+
+    pub fn fee_updated(env: &Env) -> Symbol {
+        Symbol::new(env, "fee_updated")
+    }
+
+    pub fn settlement_contract_proposed(env: &Env) -> Symbol {
+        // Soroban Symbol values are capped at 32 bytes; the fuller
+        // "settlement_contract_change_proposed" (35 bytes) exceeds that.
+        Symbol::new(env, "settlement_contract_proposed")
+    }
+
+    pub fn settlement_contract_updated(env: &Env) -> Symbol {
+        Symbol::new(env, "settlement_contract_updated")
+    }
+
+    pub fn admin_transferred(env: &Env) -> Symbol {
+        Symbol::new(env, "admin_transferred")
+    }
+
+    pub fn protocol_pause_status_changed(env: &Env) -> Symbol {
+        Symbol::new(env, "protocol_pause_status_changed")
+    }
+
+    pub fn delivery_contract_initialized(env: &Env) -> Symbol {
+        Symbol::new(env, "delivery_contract_initialized")
+    }
 }
 
 pub mod ttl {

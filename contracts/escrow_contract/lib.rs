@@ -311,7 +311,7 @@ impl EscrowContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "ProtocolInitialized"),),
+            (events::protocol_initialized(&env),),
             ProtocolInitialized {
                 admin,
                 token,
@@ -344,7 +344,7 @@ impl EscrowContract {
         config.platform_fee_bps = new_fee_bps;
         save_protocol_config(&env, &config);
         env.events().publish(
-            (Symbol::new(&env, "FeeUpdated"),),
+            (events::fee_updated(&env),),
             FeeUpdated {
                 old_fee,
                 new_fee: new_fee_bps,
@@ -427,7 +427,7 @@ impl EscrowContract {
             .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
 
         env.events().publish(
-            (Symbol::new(&env, "SettlementContractChangeProposed"),),
+            (events::settlement_contract_proposed(&env),),
             SettlementContractChangeProposed {
                 old_address,
                 proposed_address: settlement_contract,
@@ -465,7 +465,7 @@ impl EscrowContract {
             .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
 
         env.events().publish(
-            (Symbol::new(&env, "SettlementContractUpdated"),),
+            (events::settlement_contract_updated(&env),),
             SettlementContractUpdated {
                 old_address,
                 new_address: pending.settlement_contract,
@@ -563,10 +563,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
-        env.events().publish(
-            (Symbol::new(&env, "AdminTransferred"),),
-            (old_admin, new_admin),
-        );
+        env.events()
+            .publish((events::admin_transferred(&env),), (old_admin, new_admin));
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
@@ -575,7 +573,7 @@ impl EscrowContract {
         require_admin(&env, &admin);
         env.storage().instance().set(&DataKey::Paused, &paused);
         env.events().publish(
-            (Symbol::new(&env, "ProtocolPauseStatusChanged"),),
+            (events::protocol_pause_status_changed(&env),),
             (admin, paused),
         );
     }
