@@ -460,7 +460,7 @@ fn test_dispute_then_resolve_penalizes_driver() {
 // ── SELF-ASSIGNMENT REJECTION (Issue #20) ─────────────────────────────────
 
 #[test]
-#[should_panic(expected = "InvalidDriver")]
+#[should_panic(expected = "4")] // DeliveryError::InvalidDriver
 fn test_reject_assign_driver_as_sender() {
     let env = Env::default();
     let (client, shipper, _, recipient, _, _) = setup_full(&env);
@@ -471,7 +471,7 @@ fn test_reject_assign_driver_as_sender() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidDriver")]
+#[should_panic(expected = "4")] // DeliveryError::InvalidDriver
 fn test_reject_assign_driver_as_recipient() {
     let env = Env::default();
     let (client, shipper, _, recipient, _, _) = setup_full(&env);
@@ -492,6 +492,31 @@ fn test_reject_confirm_delivery_from_driver() {
     client.mark_in_transit(&driver, &delivery_id);
 
     client.confirm_delivery(&driver, &delivery_id);
+}
+
+#[test]
+#[should_panic(expected = "4")] // DeliveryError::InvalidDriver
+fn test_confirm_delivery_rejects_driver_matching_recipient() {
+    // assign_driver already rejects driver == recipient at assignment time,
+    // so this state can't arise via the normal public API. This test forces
+    // it directly to prove confirm_delivery's own defense-in-depth check
+    // (Issue #23) still rejects it with a typed error rather than silently
+    // succeeding or panicking with an untyped string.
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    env.as_contract(&client.address, || {
+        let key = delivery_key(delivery_id);
+        let mut record: DeliveryRecord = env.storage().persistent().get(&key).unwrap();
+        record.driver = Some(recipient.clone());
+        env.storage().persistent().set(&key, &record);
+    });
+
+    client.confirm_delivery(&recipient, &delivery_id);
 }
 
 // ── STATE SYNCHRONIZATION VALIDATION (Issue #19) ──────────────────────────────
@@ -1225,6 +1250,20 @@ fn test_create_deliveries_batch_registers_users() {
         last_registered, recipient,
         "Expected recipient to be registered after create_deliveries_batch"
     );
+}
+
+#[test]
+#[should_panic(expected = "3")] // DeliveryError::BatchTooLarge
+fn test_create_deliveries_batch_over_limit_rejected() {
+    let env = Env::default();
+    let (client, shipper, _driver, recipient, _, _) = setup_full(&env);
+
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    for i in 0..(MAX_BATCH_SIZE + 1) {
+        metadata_list.push_back(get_test_metadata(&env, i as u64));
+    }
+
+    client.create_deliveries_batch(&shipper, &recipient, &metadata_list);
 }
 
 #[test]

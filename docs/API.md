@@ -1778,17 +1778,18 @@ pair in one place.
 | 3 | `InsufficientFunds` | Escrow balance is too low to complete the requested transfer. |
 | 4 | `DuplicateDelivery` | An escrow already exists for the given delivery ID. |
 | 5 | `InvalidFee` | Requested platform fee exceeds the configured maximum. |
-| 6 | `InvalidToken` | Token does not match the protocol-configured token.* |
-| 6 | `InvalidAmount` | Escrow amount is not positive.* |
-
-\* `InvalidToken` and `InvalidAmount` share discriminant `6`; the raw code alone cannot
-distinguish between them.
+| 6 | `InvalidToken` | Token does not match the protocol-configured token. |
+| 7 | `InvalidAmount` | Escrow amount is not positive. |
+| 8 | `NoPendingSettlementChange` | `confirm_settlement_contract` called with no proposal pending. |
+| 9 | `TimelockNotElapsed` | `confirm_settlement_contract` called before the proposal's timelock elapsed. |
 
 #### `DeliveryError` — `delivery_contract`
 | Code | Variant | Meaning |
 |------|---------|---------|
 | 1 | `InvalidState` | Requested delivery status transition is not permitted. |
 | 2 | `InvalidMetadata` | Delivery metadata fails validation (e.g. location or weight limits). |
+| 3 | `BatchTooLarge` | `create_deliveries_batch` list exceeds `MAX_BATCH_SIZE` (100). |
+| 4 | `InvalidDriver` | Driver address matches the delivery's sender or recipient. |
 
 #### `FleetError` — `fleet_management_contract`
 | Code | Variant | Meaning |

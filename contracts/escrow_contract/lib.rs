@@ -880,9 +880,8 @@ impl EscrowContract {
             .persistent()
             .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
-        let fleet_management = get_fleet_management_contract(&env);
-        settle_escrow_funds(&env, &record, fleet_management);
-
+        // Effects (state) are committed before the interaction (transfer)
+        // below, per checks-effects-interactions.
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
 
@@ -896,6 +895,9 @@ impl EscrowContract {
             &total_locked_key,
             &current_total.saturating_sub(record.amount),
         );
+
+        let fleet_management = get_fleet_management_contract(&env);
+        settle_escrow_funds(&env, &record, fleet_management);
 
         env.events().publish(
             (events::escrow_released(&env),),
@@ -930,11 +932,9 @@ impl EscrowContract {
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
-        token::Client::new(&env, &record.token).transfer(
-            &env.current_contract_address(),
-            &record.sender,
-            &record.amount,
-        );
+
+        // Effects (state) are committed before the interaction (transfer)
+        // below, per checks-effects-interactions.
         record.status = EscrowStatus::Refunded;
         save_escrow(&env, delivery_id, &record);
 
@@ -947,6 +947,12 @@ impl EscrowContract {
         env.storage().persistent().set(
             &total_locked_key,
             &current_total.saturating_sub(record.amount),
+        );
+
+        token::Client::new(&env, &record.token).transfer(
+            &env.current_contract_address(),
+            &record.sender,
+            &record.amount,
         );
 
         env.events().publish(
@@ -993,7 +999,11 @@ impl EscrowContract {
         if record.status != EscrowStatus::Paused {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
-        if release_to_driver {
+
+        // Checks + effects (state) are resolved per-branch first; the actual
+        // fund transfer (interaction) happens only after all state below is
+        // committed, per checks-effects-interactions.
+        let fleet_management: Option<Address> = if release_to_driver {
             let base_fee_bps: u32 = env
                 .storage()
                 .instance()
@@ -1011,22 +1021,17 @@ impl EscrowContract {
                 .persistent()
                 .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
-            let fleet_management = get_fleet_management_contract(&env);
-            settle_escrow_funds(&env, &record, fleet_management);
             record.status = EscrowStatus::Released;
+            get_fleet_management_contract(&env)
         } else {
             let contract_balance =
                 token::Client::new(&env, &record.token).balance(&env.current_contract_address());
             if contract_balance < record.amount {
                 panic_with_error!(&env, EscrowError::InsufficientFunds);
             }
-            token::Client::new(&env, &record.token).transfer(
-                &env.current_contract_address(),
-                &record.sender,
-                &record.amount,
-            );
             record.status = EscrowStatus::Refunded;
-        }
+            None
+        };
 
         save_escrow(&env, delivery_id, &record);
 
@@ -1040,6 +1045,16 @@ impl EscrowContract {
             &total_locked_key,
             &current_total.saturating_sub(record.amount),
         );
+
+        if release_to_driver {
+            settle_escrow_funds(&env, &record, fleet_management);
+        } else {
+            token::Client::new(&env, &record.token).transfer(
+                &env.current_contract_address(),
+                &record.sender,
+                &record.amount,
+            );
+        }
 
         env.events().publish(
             (events::dispute_resolved(&env),),
@@ -1076,6 +1091,22 @@ impl EscrowContract {
         let sender_amount = record.amount.saturating_mul(sender_share_bps as i128) / 10000;
         let driver_amount = record.amount.saturating_sub(sender_amount);
 
+        // Effects (state) are committed before the interactions (transfers)
+        // below, per checks-effects-interactions.
+        record.status = EscrowStatus::Split;
+        save_escrow(&env, delivery_id, &record);
+
+        let total_locked_key = DataKey::TotalLocked(record.token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_sub(record.amount),
+        );
+
         if sender_amount > 0 {
             token::Client::new(&env, &record.token).transfer(
                 &env.current_contract_address(),
@@ -1090,20 +1121,6 @@ impl EscrowContract {
                 &driver_amount,
             );
         }
-
-        record.status = EscrowStatus::Split;
-        save_escrow(&env, delivery_id, &record);
-
-        let total_locked_key = DataKey::TotalLocked(record.token.clone());
-        let current_total: i128 = env
-            .storage()
-            .persistent()
-            .get(&total_locked_key)
-            .unwrap_or(0);
-        env.storage().persistent().set(
-            &total_locked_key,
-            &current_total.saturating_sub(record.amount),
-        );
 
         env.events().publish(
             (events::dispute_resolved(&env),),
@@ -1149,9 +1166,8 @@ impl EscrowContract {
             .persistent()
             .set(&sender_volume_key, &sender_volume.saturating_add(1));
 
-        let fleet_management = get_fleet_management_contract(&env);
-        settle_escrow_funds(&env, &record, fleet_management);
-
+        // Effects (state) are committed before the interaction (transfer)
+        // below, per checks-effects-interactions.
         record.status = EscrowStatus::Released;
         save_escrow(&env, delivery_id, &record);
 
@@ -1165,6 +1181,9 @@ impl EscrowContract {
             &total_locked_key,
             &current_total.saturating_sub(record.amount),
         );
+
+        let fleet_management = get_fleet_management_contract(&env);
+        settle_escrow_funds(&env, &record, fleet_management);
 
         env.events().publish(
             (events::escrow_released(&env), delivery_id),
@@ -1221,11 +1240,8 @@ impl EscrowContract {
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
-        token::Client::new(&env, &record.token).transfer(
-            &env.current_contract_address(),
-            &record.sender,
-            &record.amount,
-        );
+        // Effects (state) are committed before the interaction (transfer)
+        // below, per checks-effects-interactions.
         record.status = EscrowStatus::Refunded;
         save_escrow(&env, delivery_id, &record);
 
@@ -1238,6 +1254,12 @@ impl EscrowContract {
         env.storage().persistent().set(
             &total_locked_key,
             &current_total.saturating_sub(record.amount),
+        );
+
+        token::Client::new(&env, &record.token).transfer(
+            &env.current_contract_address(),
+            &record.sender,
+            &record.amount,
         );
 
         env.events().publish(

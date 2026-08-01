@@ -33,6 +33,12 @@ pub enum DataKey {
 pub enum DeliveryError {
     InvalidState = 1,
     InvalidMetadata = 2,
+    /// A batch operation (e.g. create_deliveries_batch) exceeded MAX_BATCH_SIZE.
+    BatchTooLarge = 3,
+    /// A driver address matched the delivery's sender or recipient, which is
+    /// never valid — enforced both at assignment time and again at
+    /// confirmation time as a defense-in-depth check.
+    InvalidDriver = 4,
 }
 
 mod constants {
@@ -253,7 +259,7 @@ impl DeliveryContract {
         sender.require_auth();
 
         if metadata_list.len() > MAX_BATCH_SIZE as u32 {
-            panic!("BatchTooLarge");
+            panic_with_error!(&env, DeliveryError::BatchTooLarge);
         }
 
         if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
@@ -461,7 +467,7 @@ impl DeliveryContract {
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
 
         if driver == delivery.sender || driver == delivery.recipient {
-            panic!("InvalidDriver");
+            panic_with_error!(&env, DeliveryError::InvalidDriver);
         }
 
         validate_transition(delivery.status.clone(), DeliveryStatus::Active)
@@ -542,7 +548,7 @@ impl DeliveryContract {
 
         if let Some(driver) = &delivery.driver {
             if driver == &recipient || driver == &delivery.sender {
-                panic!("InvalidDelivery");
+                panic_with_error!(&env, DeliveryError::InvalidDriver);
             }
         }
 
@@ -700,7 +706,7 @@ impl DeliveryContract {
             .storage()
             .instance()
             .get(&DataKey::EscrowContract)
-            .unwrap_or_else(|| panic!("EscrowNotConfigured"));
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
 
         use soroban_sdk::IntoVal;
         let escrow: shared_types::EscrowRecord = env.invoke_contract(

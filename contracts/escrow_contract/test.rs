@@ -27,6 +27,43 @@ fn balance(env: &Env, token: &Address, of: &Address) -> i128 {
     TokenClient::new(env, token).balance(of)
 }
 
+/// A malicious settlement_contract used to prove the Issue #87
+/// checks-effects-interactions fix: its `execute_settlement_swap` re-enters
+/// `release_escrow` on the same delivery mid-payout, before the outer call
+/// would otherwise have returned.
+#[contract]
+struct MaliciousSettlementContract;
+
+#[contractimpl]
+impl MaliciousSettlementContract {
+    pub fn get_driver_preference(env: Env, _driver: Address) -> Option<Address> {
+        // Any address different from the escrow's real token forces
+        // payout_driver into the execute_settlement_swap path.
+        Some(Address::generate(&env))
+    }
+
+    pub fn execute_settlement_swap(
+        env: Env,
+        _caller: Address,
+        _from_token: Address,
+        _to_token: Address,
+        _recipient: Address,
+        _amount: i128,
+        _min_amount_out: i128,
+    ) {
+        let target: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "target"))
+            .unwrap();
+        let _: () = env.invoke_contract(
+            &target,
+            &Symbol::new(&env, "release_escrow"),
+            soroban_sdk::vec![&env, _recipient.into_val(&env), 900u64.into_val(&env)],
+        );
+    }
+}
+
 #[test]
 fn test_init_and_platform_fee_default() {
     let (env, contract_id) = setup_env();
@@ -1317,7 +1354,7 @@ fn test_resolve_dispute_split_100_0() {
 // ── Issue #87: Reentrancy and state-update-before-transfer tests ────────────
 
 #[test]
-fn test_release_escrow_updates_state_before_transfer() {
+fn test_protocol_config_direct_storage_write_is_readable_by_getters() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);
 
@@ -1355,6 +1392,49 @@ fn test_release_escrow_updates_state_before_transfer() {
 
     assert_eq!(migrated_fee, original_fee);
     assert_eq!(migrated_slippage, original_slippage);
+}
+
+// ── Issue #87: checks-effects-interactions reentrancy regression ────────────
+
+#[test]
+#[should_panic(expected = "Contract re-entry is not allowed")]
+fn test_release_escrow_rejects_reentrant_call_during_settlement_swap() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(&sender, &recipient, &driver, &900u64, &token, &1000, &None);
+
+    // A malicious settlement_contract whose get_driver_preference forces the
+    // execute_settlement_swap path, from which it re-enters release_escrow
+    // on the same delivery before the outer call would have returned.
+    // Soroban's host itself blocks same-contract reentrancy ("Contract
+    // re-entry is not allowed"), so this is defense-in-depth on top of a
+    // platform-level guarantee, not the last line of defense: the
+    // checks-effects-interactions ordering fixed for Issue #87 still
+    // matters because it also determines what state a *legitimate*
+    // cross-contract call (e.g. a real DEX during execute_settlement_swap)
+    // would observe if it queried get_escrow mid-payout.
+    let malicious_id = env.register(MaliciousSettlementContract, ());
+    env.as_contract(&malicious_id, || {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "target"), &contract_id);
+    });
+    client.set_settlement_contract(&admin, &malicious_id);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+    client.confirm_settlement_contract(&admin);
+
+    client.release_escrow(&recipient, &900u64);
 }
 
 #[test]
