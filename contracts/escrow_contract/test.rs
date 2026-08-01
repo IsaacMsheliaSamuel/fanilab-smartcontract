@@ -547,6 +547,16 @@ fn test_set_settlement_contract_emits_event() {
     client.init(&admin, &token, &0);
     client.set_settlement_contract(&admin, &settlement_contract);
 
+    // set_settlement_contract only proposes the change (Issue #16 timelock);
+    // it must be confirmed after the timelock elapses to actually apply.
+    assert_eq!(client.get_settlement_contract(), None);
+    let pending = client.get_pending_settlement_contract().unwrap();
+    assert_eq!(pending.settlement_contract, settlement_contract);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+    client.confirm_settlement_contract(&admin);
+
     assert_eq!(
         client.get_settlement_contract(),
         Some(settlement_contract.clone())
@@ -896,10 +906,60 @@ fn test_clear_settlement_contract_reverts_to_none() {
 
     client.init(&admin, &token, &0);
     client.set_settlement_contract(&admin, &settlement_contract);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+    client.confirm_settlement_contract(&admin);
     assert_eq!(client.get_settlement_contract(), Some(settlement_contract));
 
     client.clear_settlement_contract(&admin);
     assert_eq!(client.get_settlement_contract(), None);
+}
+
+#[test]
+fn test_clear_settlement_contract_also_cancels_pending_proposal() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_settlement_contract(&admin, &settlement_contract);
+    assert!(client.get_pending_settlement_contract().is_some());
+
+    client.clear_settlement_contract(&admin);
+    assert_eq!(client.get_pending_settlement_contract(), None);
+
+    // The now-cancelled proposal can no longer be confirmed.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+    let result = client.try_confirm_settlement_contract(&admin);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::NoPendingSettlementChange.into()),
+        _ => panic!("Expected EscrowError::NoPendingSettlementChange"),
+    }
+}
+
+#[test]
+fn test_confirm_settlement_contract_before_timelock_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let settlement_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_settlement_contract(&admin, &settlement_contract);
+
+    let result = client.try_confirm_settlement_contract(&admin);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::TimelockNotElapsed.into()),
+        _ => panic!("Expected EscrowError::TimelockNotElapsed"),
+    }
 }
 
 #[test]
@@ -1400,6 +1460,13 @@ fn test_set_settlement_contract_updates_getter() {
     assert_eq!(result_before, None);
 
     client.set_settlement_contract(&admin, &settlement_contract);
+
+    // Proposing alone must not update the active getter until confirmed.
+    assert_eq!(client.get_settlement_contract(), None);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+    client.confirm_settlement_contract(&admin);
 
     let result_after = client.get_settlement_contract();
     assert_eq!(result_after, Some(settlement_contract));

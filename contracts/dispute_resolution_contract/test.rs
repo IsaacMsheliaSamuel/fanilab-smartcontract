@@ -228,6 +228,30 @@ fn test_admin_whitelist_management() {
 }
 
 #[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
+fn test_remove_last_admin_rejected() {
+    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    // `admin` is the only admin left after init — removing it must be
+    // rejected, since it would permanently brick governance (no one left
+    // who could call add_admin to recover).
+    dispute_client.remove_admin(&admin, &admin);
+}
+
+#[test]
+fn test_remove_admin_allowed_when_multiple_admins_remain() {
+    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    let second_admin = Address::generate(&env);
+    dispute_client.add_admin(&admin, &second_admin);
+
+    // With two admins present, removing one must still succeed.
+    dispute_client.remove_admin(&admin, &admin);
+    assert!(!dispute_client.is_admin(&admin));
+    assert!(dispute_client.is_admin(&second_admin));
+}
+
+#[test]
 #[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
 fn test_unauthorized_add_admin_fails() {
     let (env, _, sender, _, _, _, _, dispute_client) = setup_test();

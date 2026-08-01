@@ -120,9 +120,6 @@ impl DisputeResolutionContract {
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
-        env.storage()
-            .instance()
-            .remove(&DataKey::Admin(old_admin.clone()));
 
         let admin_list: Vec<Address> = env
             .storage()
@@ -136,6 +133,16 @@ impl DisputeResolutionContract {
                 new_list.push_back(admin);
             }
         }
+
+        // Removing the last admin would permanently brick governance — no one
+        // would be left who could call add_admin to recover.
+        if new_list.is_empty() {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::Admin(old_admin.clone()));
         env.storage().instance().set(&DataKey::AdminList, &new_list);
     }
 

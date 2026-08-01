@@ -14,6 +14,7 @@ pub mod constants {
     pub const MAX_BATCH_SIZE: u32 = 100;
     pub const DEFAULT_ESCROW_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
     pub const MAX_PLATFORM_FEE_BPS: u32 = 1000;
+    pub const SETTLEMENT_CONTRACT_TIMELOCK_SECONDS: u64 = 3 * 24 * 60 * 60; // 3 days
 }
 
 fn require_admin(env: &Env, caller: &Address) {
@@ -207,6 +208,7 @@ fn load_escrow(env: &Env, delivery_id: u64) -> EscrowRecord {
 enum DataKey {
     PendingAdmin,
     SettlementContract,
+    PendingSettlementContract,
     /// Secondary index: escrows by sender (Vec<u64> delivery IDs).
     EscrowsBySender(Address),
     /// Secondary index: escrows by recipient (Vec<u64> delivery IDs).
@@ -235,6 +237,8 @@ pub enum EscrowError {
     InvalidFee = 5,
     InvalidToken = 6,
     InvalidAmount = 7,
+    NoPendingSettlementChange = 8,
+    TimelockNotElapsed = 9,
 }
 
 #[contracttype]
@@ -258,6 +262,21 @@ pub struct ProtocolInitialized {
 pub struct SettlementContractUpdated {
     pub old_address: Option<Address>,
     pub new_address: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSettlementContract {
+    pub settlement_contract: Address,
+    pub activates_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementContractChangeProposed {
+    pub old_address: Option<Address>,
+    pub proposed_address: Address,
+    pub activates_at: u64,
 }
 
 #[contracttype]
@@ -378,25 +397,89 @@ impl EscrowContract {
         load_protocol_config(&env).slippage_tolerance_bps
     }
 
+    /// Propose a new settlement_contract address. The change does not take
+    /// effect immediately: it becomes eligible for confirmation only after
+    /// `SETTLEMENT_CONTRACT_TIMELOCK_SECONDS` have elapsed, via
+    /// `confirm_settlement_contract`. This prevents a compromised or
+    /// malicious admin key from silently redirecting every driver payout to
+    /// an attacker-controlled contract with no warning. Proposing again
+    /// before confirmation overwrites the pending change and restarts the
+    /// timelock.
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
     pub fn set_settlement_contract(env: Env, admin: Address, settlement_contract: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
         let old_address = get_settlement_contract(&env);
+
+        let activates_at = env
+            .ledger()
+            .timestamp()
+            .saturating_add(constants::SETTLEMENT_CONTRACT_TIMELOCK_SECONDS);
+        let pending = PendingSettlementContract {
+            settlement_contract: settlement_contract.clone(),
+            activates_at,
+        };
         env.storage()
             .instance()
-            .set(&DataKey::SettlementContract, &settlement_contract);
-
+            .set(&DataKey::PendingSettlementContract, &pending);
         env.storage()
             .instance()
             .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
+
+        env.events().publish(
+            (Symbol::new(&env, "SettlementContractChangeProposed"),),
+            SettlementContractChangeProposed {
+                old_address,
+                proposed_address: settlement_contract,
+                activates_at,
+            },
+        );
+    }
+
+    /// Apply a previously proposed settlement_contract change once its
+    /// timelock has elapsed.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn confirm_settlement_contract(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+
+        let pending: PendingSettlementContract = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingSettlementContract)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NoPendingSettlementChange));
+
+        if env.ledger().timestamp() < pending.activates_at {
+            panic_with_error!(&env, EscrowError::TimelockNotElapsed);
+        }
+
+        let old_address = get_settlement_contract(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::SettlementContract, &pending.settlement_contract);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingSettlementContract);
+        env.storage()
+            .instance()
+            .extend_ttl(ttl::LEDGER_TTL_THRESHOLD, ttl::LEDGER_TTL_EXTEND_TO);
+
         env.events().publish(
             (Symbol::new(&env, "SettlementContractUpdated"),),
             SettlementContractUpdated {
                 old_address,
-                new_address: settlement_contract,
+                new_address: pending.settlement_contract,
             },
         );
+    }
+
+    /// Return the pending settlement_contract change, if any, so off-chain
+    /// clients can display the upcoming payout-routing change during its
+    /// timelock window.
+    pub fn get_pending_settlement_contract(env: Env) -> Option<PendingSettlementContract> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingSettlementContract)
     }
 
     pub fn get_settlement_contract(env: Env) -> Option<Address> {
@@ -410,6 +493,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .remove(&DataKey::SettlementContract);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingSettlementContract);
     }
 
     pub fn set_fleet_management_contract(env: Env, admin: Address, fleet_contract: Address) {
