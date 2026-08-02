@@ -686,6 +686,19 @@ Get driver statistics and reputation.
 
 **Returns:** `DriverProfile`
 
+#### `get_escrow_contract`
+Return the escrow_contract address this delivery_contract was initialised with.
+
+**Returns:** `Address`
+
+**Errors:**
+- `NotInitialized` - Contract has not been initialized
+
+#### `get_identity_reputation_contract`
+Return the configured identity_reputation_contract address, if any.
+
+**Returns:** `Option<Address>`
+
 ---
 
 ## Dispute Resolution Contract

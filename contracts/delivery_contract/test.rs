@@ -173,6 +173,13 @@ fn get_test_metadata_with_estimate(
     }
 }
 
+#[test]
+fn test_get_escrow_contract_returns_configured_address() {
+    let env = Env::default();
+    let (client, _shipper, _driver, _recipient, escrow_id, _) = setup_full(&env);
+    assert_eq!(client.get_escrow_contract(), escrow_id);
+}
+
 // ── HAPPY PATH ───────────────────────────────────────────────────────────────
 
 #[test]

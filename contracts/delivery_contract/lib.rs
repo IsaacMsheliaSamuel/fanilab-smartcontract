@@ -139,6 +139,16 @@ impl DeliveryContract {
             .get(&DataKey::IdentityReputationContract)
     }
 
+    /// Returns the escrow_contract address this delivery_contract was
+    /// initialised with (Issue #129 — deployment docs referenced this
+    /// accessor before it existed).
+    pub fn get_escrow_contract(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized))
+    }
+
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn create_delivery(
         env: Env,
