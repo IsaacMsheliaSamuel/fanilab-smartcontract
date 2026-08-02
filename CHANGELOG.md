@@ -15,8 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `identity_reputation_contract::has_driver_profile` query function for driver existence checks
 - `shared_types::ttl` constants (`LEDGER_TTL_THRESHOLD`, `LEDGER_TTL_EXTEND_TO`) now used by `delivery_contract`, `dispute_resolution_contract`, `identity_reputation_contract`, and `fleet_management_contract` instead of hand-typed `518400, 518400` literals at every `extend_ttl` call site
 - `fleet_management_contract::confirm_fleet_treasury_update` and `get_pending_treasury_update` to support a timelocked treasury change flow
+- `delivery_contract::get_escrow_contract` — a read-only getter for the configured escrow contract address, matching the equivalent getter every other contract that stores a peer-contract address already had
+- Regression tests proving the FA-2 dispute-resolution-bypass fix holds: an unauthorized caller cannot invoke `escrow_contract::freeze_funds`, and `delivery_contract::cancel_delivery` is rejected once a delivery has reached `Disputed`
+- Cross-contract integration tests: a full delivery → escrow → dispute_resolution → identity_reputation chain asserting a driver's reputation score actually decreases on `resolve_dispute_refund_sender`, and a full escrow → fleet_management chain asserting an active fleet driver's payout is routed to the fleet treasury rather than the driver directly
 
 ### Changed
+- `fleet_management_contract` and `identity_reputation_contract` now use `shared_types::is_admin`/`StorageKey::Admin` instead of their own local single-admin helpers, matching `escrow_contract` and `delivery_contract` (see ADR-011's addendum for why `shared_types::governance::AdminManager` was removed instead of adopted)
+- `Makefile.windows` now builds against `wasm32v1-none` instead of the legacy `wasm32-unknown-unknown` target; CI's wasm-target drift check now also scans `Makefile.windows` and `.vscode/`
 - `escrow_contract::create_escrow` now validates `token` matches the protocol-configured token
 - `fleet_management_contract::register_fleet` checks driver profile existence before calling `register_driver`, preventing panic for already-registered drivers
 - `fleet_management_contract::update_fleet_treasury` now only *proposes* a treasury change; it takes effect only after a 3-day timelock and an explicit `confirm_fleet_treasury_update` call, giving active drivers advance notice via the new `fleet_treasury_change_proposed` event
