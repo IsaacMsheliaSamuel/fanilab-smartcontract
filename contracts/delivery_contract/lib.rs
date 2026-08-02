@@ -99,7 +99,7 @@ pub struct DeliveryContract;
 
 #[contractimpl]
 impl DeliveryContract {
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn init(env: Env, admin: Address, escrow_contract: Address) {
         if env.storage().instance().has(&StorageKey::Admin) {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
@@ -139,7 +139,7 @@ impl DeliveryContract {
             .get(&DataKey::IdentityReputationContract)
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn create_delivery(
         env: Env,
         sender: Address,
@@ -252,7 +252,7 @@ impl DeliveryContract {
     /// Create multiple deliveries in a single transaction.  Sender must authorize.
     /// Returns Vec of created delivery IDs.  Each delivery funds escrow individually
     /// via cross-contract calls to the escrow contract.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn create_deliveries_batch(
         env: Env,
         sender: Address,
@@ -369,7 +369,7 @@ impl DeliveryContract {
         result
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn update_delivery_metadata(
         env: Env,
         sender: Address,
@@ -415,7 +415,7 @@ impl DeliveryContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn cancel_delivery(env: Env, sender: Address, delivery_id: DeliveryId) {
         sender.require_auth();
 
@@ -462,7 +462,7 @@ impl DeliveryContract {
             .publish((events::delivery_cancelled(&env),), (delivery_id, sender));
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn assign_driver(env: Env, caller: Address, delivery_id: DeliveryId, driver: Address) {
         caller.require_auth();
 
@@ -508,7 +508,7 @@ impl DeliveryContract {
 
     /// Allow the assigned driver to mark a delivery as actively in transit.
     /// Transitions: Active â†’ InTransit. Records the ledger timestamp.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn mark_in_transit(env: Env, driver: Address, delivery_id: DeliveryId) {
         driver.require_auth();
 
@@ -545,7 +545,7 @@ impl DeliveryContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn confirm_delivery(env: Env, recipient: Address, delivery_id: DeliveryId) {
         recipient.require_auth();
 
@@ -627,7 +627,7 @@ impl DeliveryContract {
     /// Allow sender or recipient to escalate a delivery to Disputed and pause
     /// the escrow via a cross-contract call. The escrow call executes first so
     /// that delivery state is never mutated when the escrow call fails.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 

@@ -119,6 +119,8 @@ If you're migrating your own Soroban project to SDK 27.0.0, follow these steps:
 ### Event System Migration
 The Soroban SDK team is working on a new event system using the `#[contractevent]` macro. However, as of SDK 27.0.0, this system is not fully functional. The deprecated `env.events().publish()` API remains the recommended approach until further notice.
 
+**Tracked follow-up (Issue [#114](https://github.com/fanilabs/fanilab-smartcontract/issues/114)):** every call site that publishes an event carries its own `#[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional — tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)` annotation (deliberately per-function rather than a crate-level `#![allow(deprecated)]`, so any *other* future deprecation in these files still surfaces as a normal warning). When `#[contractevent]` — or whatever the SDK's eventual replacement turns out to be — is stable and functional, migrate every one of these call sites and delete the `#[allow(deprecated)]` annotations; re-check this section at the next SDK bump.
+
 ### Test Compilation Time
 SDK 27.0.0 has a larger dependency tree, which may result in longer initial compilation times for tests. Subsequent builds benefit from caching.
 

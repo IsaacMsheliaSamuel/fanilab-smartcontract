@@ -131,7 +131,7 @@ impl FleetManagementContract {
     /// The caller (owner) must sign the transaction.  Returns the new fleet id.
     /// If an identity contract is configured, automatically creates an identity
     /// profile for the owner via a cross-contract call.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn register_fleet(env: Env, owner: Address, treasury: Address) -> FleetId {
         owner.require_auth();
 
@@ -221,7 +221,7 @@ impl FleetManagementContract {
     /// address instead of the fleet treasury. Existing drivers are left in
     /// place rather than auto-removed; they may be individually removed via
     /// `remove_driver_from_fleet` if desired.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn deactivate_fleet(env: Env, caller: Address, fleet_id: FleetId) {
         caller.require_auth();
 
@@ -266,7 +266,7 @@ impl FleetManagementContract {
     ///   new owner has immediate unilateral control.  If the fleet used a
     ///   multi-sig configuration the admin (or the new owner) can restore it
     ///   via `configure_signers` after recovery.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn admin_reassign_fleet_owner(
         env: Env,
         admin: Address,
@@ -330,7 +330,7 @@ impl FleetManagementContract {
     /// If there is a pending owner-initiated treasury change in progress it is
     /// cleared, preventing it from overwriting the admin-set address after
     /// the emergency is resolved.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn admin_force_update_treasury(
         env: Env,
         admin: Address,
@@ -387,7 +387,7 @@ impl FleetManagementContract {
     /// advance notice (via the `fleet_treasury_change_proposed` event) before
     /// their future payouts are redirected. Proposing again before
     /// confirmation overwrites the pending change and restarts the timelock.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn update_fleet_treasury(env: Env, owner: Address, fleet_id: FleetId, treasury: Address) {
         owner.require_auth();
 
@@ -445,7 +445,7 @@ impl FleetManagementContract {
     /// Callable by anyone: the security guarantee is the elapsed delay, not
     /// caller identity, matching `reclaim_expired_escrow`'s permissionless
     /// finalization pattern.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn confirm_fleet_treasury_update(env: Env, fleet_id: FleetId) {
         let pending_key = DataKey::PendingTreasury(fleet_id);
         let pending: PendingTreasuryChange = env
@@ -504,7 +504,7 @@ impl FleetManagementContract {
     /// `caller` must be an authorized signer and must sign the transaction.
     /// Stores a `Pending` invite for `driver` under this fleet.
     /// The driver must later call `accept_fleet_invite` to become active.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn add_driver_to_fleet(env: Env, caller: Address, fleet_id: FleetId, driver: Address) {
         caller.require_auth();
 
@@ -619,7 +619,7 @@ impl FleetManagementContract {
     /// Accept a pending fleet invite.  The driver themselves must sign this
     /// transaction.  Transitions status from `Pending` → `Active` and
     /// increments `total_active_drivers` on the fleet profile.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn accept_fleet_invite(env: Env, fleet_id: FleetId, driver: Address) {
         // Driver must authorise.
         driver.require_auth();
@@ -715,7 +715,7 @@ impl FleetManagementContract {
     /// `caller` must be either an authorized signer or the driver being removed.
     /// Deletes the driver's fleet record and, if the driver was `Active`,
     /// decrements `total_active_drivers` on the fleet profile.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn remove_driver_from_fleet(env: Env, fleet_id: FleetId, caller: Address, driver: Address) {
         let mut profile: FleetProfile = env
             .storage()
@@ -856,7 +856,7 @@ impl FleetManagementContract {
     /// Configure multi-signature requirements for a fleet.
     /// Only the fleet owner may call this. Sets the authorized signers and
     /// signature threshold for treasury and driver removal actions.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn configure_signers(
         env: Env,
         owner: Address,

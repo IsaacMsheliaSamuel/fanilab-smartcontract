@@ -158,7 +158,7 @@ impl IdentityReputationContract {
             .is_some()
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn register_driver(env: Env, driver: Address) {
         driver.require_auth();
         let key = DataKey::DriverProfile(driver.clone());
@@ -187,7 +187,7 @@ impl IdentityReputationContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn register_user(env: Env, user: Address) -> UserProfile {
         user.require_auth();
 
@@ -238,7 +238,7 @@ impl IdentityReputationContract {
         profile
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn update_driver_kyc_status(env: Env, admin: Address, driver: Address, kyc_verified: bool) {
         admin.require_auth();
 
@@ -271,7 +271,7 @@ impl IdentityReputationContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn increase_reputation(
         env: Env,
         caller: Address,
@@ -322,7 +322,7 @@ impl IdentityReputationContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn decrease_reputation(env: Env, caller: Address, driver: Address, points: u32) {
         if !Self::is_authorized_contract(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);

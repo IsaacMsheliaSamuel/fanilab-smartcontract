@@ -240,7 +240,7 @@ impl DisputeResolutionContract {
             .set(&DataKey::DisputeResolutionLimit, &new_limit);
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn update_dispute_time_limit(env: Env, caller: Address, new_limit: u64) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -255,7 +255,7 @@ impl DisputeResolutionContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn raise_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 
@@ -345,7 +345,7 @@ impl DisputeResolutionContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn add_evidence_hash(
         env: Env,
         caller: Address,
@@ -397,7 +397,7 @@ impl DisputeResolutionContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn resolve_dispute_refund_sender(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -479,7 +479,7 @@ impl DisputeResolutionContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn resolve_dispute_split_funds(
         env: Env,
         caller: Address,
@@ -576,7 +576,7 @@ impl DisputeResolutionContract {
         );
     }
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn resolve_dispute_pay_driver(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -656,7 +656,7 @@ impl DisputeResolutionContract {
     /// Force-resolve a dispute that has been Open past the configured resolution window.
     /// Any party (sender, recipient, or driver) may call this once the window has elapsed.
     /// Applies a 50/50 default split as the automatic fallback outcome.
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn force_resolve_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
 
