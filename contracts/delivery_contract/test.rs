@@ -309,6 +309,30 @@ fn test_invalid_dispute_when_cancelled() {
     client.raise_dispute(&shipper, &delivery_id);
 }
 
+/// Issue #93 regression test: once a delivery has reached `Disputed`, the
+/// sender must not be able to unilaterally cancel it and force a self-refund
+/// — that would bypass admin-mediated dispute resolution entirely. There is
+/// no `Disputed -> Cancelled` transition in `validate_transition`, so this
+/// must panic with `InvalidState` rather than routing to `refund_escrow`.
+#[test]
+#[should_panic(expected = "5")]
+fn test_cancel_delivery_rejected_once_disputed() {
+    let env = Env::default();
+    let (client, shipper, driver, recipient, _, _) = setup_full(&env);
+    let metadata = get_test_metadata(&env, 1);
+    let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+    client.assign_driver(&driver, &delivery_id, &driver);
+    client.mark_in_transit(&driver, &delivery_id);
+
+    client.raise_dispute(&shipper, &delivery_id);
+    assert_eq!(
+        client.get_delivery(&delivery_id).status,
+        DeliveryStatus::Disputed
+    );
+
+    client.cancel_delivery(&shipper, &delivery_id);
+}
+
 #[test]
 #[should_panic(expected = "5")]
 fn test_invalid_cancel_when_delivered() {

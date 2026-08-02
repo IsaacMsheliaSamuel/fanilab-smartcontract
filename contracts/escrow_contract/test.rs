@@ -2041,3 +2041,33 @@ fn test_freeze_funds_remains_available_while_paused() {
 
     assert_eq!(client.get_escrow(&909u64).status, EscrowStatus::Paused);
 }
+
+/// Issue #7 regression test: freeze_funds must reject any caller other than
+/// the configured dispute_resolution_contract, otherwise any address could
+/// unilaterally DoS every in-flight escrow in the protocol.
+#[test]
+fn test_freeze_funds_unauthorized_caller_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let dispute_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_dispute_resolution_contract(&admin, &dispute_contract);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(&sender, &recipient, &driver, &910u64, &token, &1000, &None);
+
+    let result = client.try_freeze_funds(&attacker, &910u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+    assert_eq!(client.get_escrow(&910u64).status, EscrowStatus::Locked);
+}
