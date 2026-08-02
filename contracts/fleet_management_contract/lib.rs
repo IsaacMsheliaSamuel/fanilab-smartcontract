@@ -675,7 +675,7 @@ impl FleetManagementContract {
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
 
         // Guard against unbounded roster growth.
-        if roster.len() >= MAX_ROSTER_SIZE as u32 {
+        if roster.len() >= MAX_ROSTER_SIZE {
             panic_with_error!(&env, FleetError::FleetNotFound);
         }
 
@@ -782,7 +782,7 @@ impl FleetManagementContract {
                     }
                 }
             }
-            if new_roster.len() > 0 {
+            if !new_roster.is_empty() {
                 env.storage().persistent().set(&roster_key, &new_roster);
                 env.storage().persistent().extend_ttl(
                     &roster_key,
@@ -876,7 +876,7 @@ impl FleetManagementContract {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 
-        if threshold == 0 || threshold as u32 > signers.len() {
+        if threshold == 0 || threshold > signers.len() {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 

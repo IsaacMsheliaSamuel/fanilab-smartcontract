@@ -156,7 +156,7 @@ fn settle_escrow_funds(env: &Env, record: &EscrowRecord, fleet_management_addr: 
     let driver_amount = record.amount.saturating_sub(platform_fee);
 
     payout_driver(
-        &env,
+        env,
         &record.token,
         &record.driver,
         driver_amount,
@@ -170,7 +170,7 @@ fn settle_escrow_funds(env: &Env, record: &EscrowRecord, fleet_management_addr: 
             .instance()
             .get(&StorageKey::Admin)
             .expect("Not initialized");
-        token::Client::new(&env, &record.token).transfer(
+        token::Client::new(env, &record.token).transfer(
             &env.current_contract_address(),
             &admin,
             &platform_fee,
@@ -584,7 +584,12 @@ impl EscrowContract {
 
     // ── Escrow lifecycle ──────────────────────────────────────────────────────
 
-    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    #[allow(deprecated)]
+    // events().publish() is deprecated in SDK 27.0.0 but still functional
+    // 7 domain parameters (+ env) are all independently meaningful to callers;
+    // bundling them into a struct would be a breaking change to a public,
+    // already-integrated entry point for no safety benefit.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_escrow(
         env: Env,
         sender: Address,
@@ -607,11 +612,7 @@ impl EscrowContract {
         if token != config.token {
             panic_with_error!(&env, EscrowError::InvalidToken);
         }
-        token::Client::new(&env, &token).transfer(
-            &sender,
-            &env.current_contract_address(),
-            &amount,
-        );
+        token::Client::new(&env, &token).transfer(&sender, env.current_contract_address(), &amount);
         let record_token_clone = token.clone();
         let created_at = env.ledger().timestamp();
         let expires_at = created_at.saturating_add(constants::DEFAULT_ESCROW_EXPIRY_SECONDS);
@@ -714,7 +715,7 @@ impl EscrowContract {
         sender.require_auth();
         require_not_paused(&env);
 
-        if escrow_list.len() > constants::MAX_BATCH_SIZE as u32 {
+        if escrow_list.len() > constants::MAX_BATCH_SIZE {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
 
@@ -744,7 +745,7 @@ impl EscrowContract {
                 }
                 token::Client::new(&env, &token).transfer(
                     &sender,
-                    &env.current_contract_address(),
+                    env.current_contract_address(),
                     &amount,
                 );
                 let created_at = env.ledger().timestamp();

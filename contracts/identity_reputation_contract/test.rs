@@ -32,7 +32,7 @@ fn test_register_driver() {
     assert_eq!(profile.address, driver);
     assert_eq!(profile.reputation_score, 50);
     assert_eq!(profile.deliveries_completed, 0);
-    assert_eq!(profile.kyc_verified, false);
+    assert!(!profile.kyc_verified);
 }
 
 #[test]
@@ -55,12 +55,12 @@ fn test_kyc_status_update_by_admin() {
     client.register_driver(&driver);
 
     let profile = client.get_driver_profile(&driver);
-    assert_eq!(profile.kyc_verified, false);
+    assert!(!profile.kyc_verified);
 
     client.update_driver_kyc_status(&admin, &driver, &true);
 
     let updated = client.get_driver_profile(&driver);
-    assert_eq!(updated.kyc_verified, true);
+    assert!(updated.kyc_verified);
     assert_eq!(updated.address, driver);
 }
 
@@ -88,7 +88,7 @@ fn test_profile_fields_persisted() {
     assert_eq!(profile.address, driver);
     assert_eq!(profile.reputation_score, 50);
     assert_eq!(profile.deliveries_completed, 0);
-    assert_eq!(profile.kyc_verified, false);
+    assert!(!profile.kyc_verified);
 }
 
 // Task 3 tests: Reputation Scoring Logic
@@ -484,13 +484,13 @@ fn test_set_and_is_authorized_contract_roundtrip() {
     let (env, admin, client, _, _) = setup();
     let contract_addr = Address::generate(&env);
 
-    assert_eq!(client.is_authorized_contract(&contract_addr), false);
+    assert!(!client.is_authorized_contract(&contract_addr));
 
     client.set_authorized_contract(&admin, &contract_addr, &true);
-    assert_eq!(client.is_authorized_contract(&contract_addr), true);
+    assert!(client.is_authorized_contract(&contract_addr));
 
     client.set_authorized_contract(&admin, &contract_addr, &false);
-    assert_eq!(client.is_authorized_contract(&contract_addr), false);
+    assert!(!client.is_authorized_contract(&contract_addr));
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn test_is_eligible_for_enterprise_below_threshold() {
     client.register_driver(&driver);
 
     // Freshly registered drivers start at 50, below the 75 threshold.
-    assert_eq!(client.is_eligible_for_enterprise(&driver), false);
+    assert!(!client.is_eligible_for_enterprise(&driver));
 }
 
 #[test]
@@ -514,7 +514,7 @@ fn test_is_eligible_for_enterprise_at_threshold() {
     }
     let profile = client.get_driver_profile(&driver);
     assert_eq!(profile.reputation_score, 75);
-    assert_eq!(client.is_eligible_for_enterprise(&driver), true);
+    assert!(client.is_eligible_for_enterprise(&driver));
 }
 
 #[test]
@@ -528,5 +528,5 @@ fn test_is_eligible_for_enterprise_above_threshold() {
     }
     let profile = client.get_driver_profile(&driver);
     assert!(profile.reputation_score > 75);
-    assert_eq!(client.is_eligible_for_enterprise(&driver), true);
+    assert!(client.is_eligible_for_enterprise(&driver));
 }

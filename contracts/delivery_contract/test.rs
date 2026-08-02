@@ -1100,7 +1100,7 @@ fn test_update_delivery_metadata_while_pending() {
         updated_delivery.metadata.cargo_description.weight_grams,
         500
     );
-    assert_eq!(updated_delivery.metadata.cargo_description.fragile, true);
+    assert!(updated_delivery.metadata.cargo_description.fragile);
 }
 
 // ── DeliveryMetadata.delivery_id cross-check (Issue #45) ───────────────────

@@ -57,18 +57,18 @@ mod constants {
 ///   Cancelled → (terminal, no transitions)
 ///   Delivered → (terminal, no further transitions)
 pub fn validate_transition(from: DeliveryStatus, to: DeliveryStatus) -> Result<(), FaniLabError> {
-    let valid = match (from, to) {
-        (DeliveryStatus::Pending, DeliveryStatus::Active) => true,
-        (DeliveryStatus::Pending, DeliveryStatus::Cancelled) => true,
-        (DeliveryStatus::Active, DeliveryStatus::InTransit) => true,
-        (DeliveryStatus::Active, DeliveryStatus::Disputed) => true,
-        (DeliveryStatus::Active, DeliveryStatus::Cancelled) => true,
-        (DeliveryStatus::InTransit, DeliveryStatus::Delivered) => true,
-        (DeliveryStatus::InTransit, DeliveryStatus::Disputed) => true,
-        (DeliveryStatus::Delivered, DeliveryStatus::Disputed) => true,
-        (DeliveryStatus::Disputed, DeliveryStatus::Delivered) => true,
-        _ => false,
-    };
+    let valid = matches!(
+        (from, to),
+        (DeliveryStatus::Pending, DeliveryStatus::Active)
+            | (DeliveryStatus::Pending, DeliveryStatus::Cancelled)
+            | (DeliveryStatus::Active, DeliveryStatus::InTransit)
+            | (DeliveryStatus::Active, DeliveryStatus::Disputed)
+            | (DeliveryStatus::Active, DeliveryStatus::Cancelled)
+            | (DeliveryStatus::InTransit, DeliveryStatus::Delivered)
+            | (DeliveryStatus::InTransit, DeliveryStatus::Disputed)
+            | (DeliveryStatus::Delivered, DeliveryStatus::Disputed)
+            | (DeliveryStatus::Disputed, DeliveryStatus::Delivered)
+    );
     if valid {
         Ok(())
     } else {
@@ -80,10 +80,10 @@ fn validate_delivery_metadata(
     _env: &Env,
     metadata: &DeliveryMetadata,
 ) -> Result<(), DeliveryError> {
-    if metadata.origin.len() == 0 || metadata.origin.len() > constants::MAX_LOCATION_LEN {
+    if metadata.origin.is_empty() || metadata.origin.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
-    if metadata.destination.len() == 0 || metadata.destination.len() > constants::MAX_LOCATION_LEN {
+    if metadata.destination.is_empty() || metadata.destination.len() > constants::MAX_LOCATION_LEN {
         return Err(DeliveryError::InvalidMetadata);
     }
     if metadata.cargo_description.weight_grams == 0
@@ -261,7 +261,7 @@ impl DeliveryContract {
     ) -> soroban_sdk::Vec<DeliveryId> {
         sender.require_auth();
 
-        if metadata_list.len() > MAX_BATCH_SIZE as u32 {
+        if metadata_list.len() > MAX_BATCH_SIZE {
             panic_with_error!(&env, DeliveryError::BatchTooLarge);
         }
 
@@ -430,7 +430,7 @@ impl DeliveryContract {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
-        validate_transition(delivery.status.clone(), DeliveryStatus::Cancelled)
+        validate_transition(delivery.status, DeliveryStatus::Cancelled)
             .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let escrow_address: Address = env
@@ -484,7 +484,7 @@ impl DeliveryContract {
             panic_with_error!(&env, DeliveryError::InvalidDriver);
         }
 
-        validate_transition(delivery.status.clone(), DeliveryStatus::Active)
+        validate_transition(delivery.status, DeliveryStatus::Active)
             .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         delivery.driver = Some(driver.clone());
@@ -525,7 +525,7 @@ impl DeliveryContract {
             _ => panic_with_error!(&env, FaniLabError::Unauthorized),
         }
 
-        validate_transition(delivery.status.clone(), DeliveryStatus::InTransit)
+        validate_transition(delivery.status, DeliveryStatus::InTransit)
             .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let timestamp = env.ledger().timestamp();
@@ -566,7 +566,7 @@ impl DeliveryContract {
             }
         }
 
-        validate_transition(delivery.status.clone(), DeliveryStatus::Delivered)
+        validate_transition(delivery.status, DeliveryStatus::Delivered)
             .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let escrow_address: Address = env
@@ -644,7 +644,7 @@ impl DeliveryContract {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
-        validate_transition(delivery.status.clone(), DeliveryStatus::Disputed)
+        validate_transition(delivery.status, DeliveryStatus::Disputed)
             .unwrap_or_else(|_| panic_with_error!(&env, FaniLabError::InvalidState));
 
         let escrow_address: Address = env

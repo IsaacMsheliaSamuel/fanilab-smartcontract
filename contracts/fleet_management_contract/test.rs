@@ -1092,7 +1092,7 @@ fn test_owner_can_deactivate_fleet() {
     client.deactivate_fleet(&owner, &fleet_id);
 
     let profile = client.get_fleet(&fleet_id);
-    assert_eq!(profile.active, false);
+    assert!(!profile.active);
 }
 
 #[test]
@@ -1103,7 +1103,7 @@ fn test_admin_can_deactivate_fleet() {
     client.deactivate_fleet(&admin, &fleet_id);
 
     let profile = client.get_fleet(&fleet_id);
-    assert_eq!(profile.active, false);
+    assert!(!profile.active);
 }
 
 #[test]

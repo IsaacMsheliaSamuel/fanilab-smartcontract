@@ -897,7 +897,7 @@ mod test {
             fragile: true,
         };
         assert_eq!(desc.weight_grams, 500);
-        assert_eq!(desc.fragile, true);
+        assert!(desc.fragile);
         assert_eq!(desc.category, CargoCategory::Electronics);
     }
 
@@ -1032,7 +1032,7 @@ mod test {
         assert_eq!(profile.deliveries_completed, 12);
         assert_eq!(profile.reputation_score, 85);
         assert_eq!(profile.registered_at, 1000000);
-        assert_eq!(profile.kyc_verified, true);
+        assert!(profile.kyc_verified);
     }
 
     #[test]
