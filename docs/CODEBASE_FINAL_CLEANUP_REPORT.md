@@ -144,7 +144,15 @@ Run from a clean working tree after all commits below:
 6. `fix: add delivery_contract::get_escrow_contract, fixing a phantom doc reference (FF-3)`
 7. `fix: finish wasm32-unknown-unknown -> wasm32v1-none sweep for Makefile.windows (FD-2 follow-up)`
 8. `docs: update CHANGELOG for this cleanup pass`
+9. `docs: add final cleanup report, commit the audit report and execution plan`
+10. `docs: remove executed audit report and cleanup plan, keep the final report` — see below.
 
-No commits touch `docs/CODEBASE_AUDIT_REPORT.md` or `docs/CODEBASE_CLEANUP_PLAN.md` themselves — those remain as the authoritative record of the audit that drove this work.
+## Documentation retained vs. removed
+
+With every batch in `docs/CODEBASE_CLEANUP_PLAN.md` complete (or, for `FA-6`/`FA-7`, already resolved), `docs/CODEBASE_AUDIT_REPORT.md` and `docs/CODEBASE_CLEANUP_PLAN.md` were reviewed for long-term value and removed from the repository:
+
+- **`docs/CODEBASE_AUDIT_REPORT.md`** described 45 findings as present-tense defects (e.g. "`freeze_funds` has no authorization check whatsoever"). Nearly all are now fixed — keeping the report verbatim would misrepresent the current codebase to any future reader who didn't notice the date, which is exactly the kind of stale-documentation risk the report's own Meta-Finding 0 warned about. Its evidence and severity assessments are preserved in git history (findable via `git log -- docs/CODEBASE_AUDIT_REPORT.md`) for anyone who needs the original analysis.
+- **`docs/CODEBASE_CLEANUP_PLAN.md`** was a batch-sequenced execution plan (effort estimates, dependencies, suggested week-by-week ordering) — process scaffolding with no purpose once every batch is done.
+- **`docs/CODEBASE_FINAL_CLEANUP_REPORT.md` (this file) is kept.** It's the durable artifact: what was actually fixed, what decisions were made and why (`FA-6`, `FA-7`, `FC-1`'s narrower-than-planned governance approach), what technical debt intentionally remains, and the validation baseline this repository last passed. `docs/ARCHITECTURE_DECISION_RECORDS.md`'s ADR-011 addendum was updated to point here instead of at the now-removed cleanup plan.
 
 The repository is ready for a single final push: all engineering tasks from the execution plan are complete or already were, all four validation commands pass, and there are no uncommitted changes.

@@ -316,9 +316,10 @@ Provide a read-only `get_combined_state(delivery_id)` view that fetches both rec
 **Date**: 2026-01-15  
 **Status**: Revised (see Addendum below) — the `AdminManager` module described
 in the original decision was built but never adopted by any contract, and
-was removed as dead code during the CODEBASE_CLEANUP_PLAN.md FC-1 batch. The
-original Context/Decision/Rationale sections are kept for history; see the
-Addendum for what was actually implemented instead.
+was removed as dead code during the FC-1 cleanup batch (see
+`docs/CODEBASE_FINAL_CLEANUP_REPORT.md`). The original Context/Decision/
+Rationale sections are kept for history; see the Addendum for what was
+actually implemented instead.
 
 ### Context
 Admin/governance models are implemented inconsistently across the six contracts: escrow_contract, delivery_contract, fleet_management_contract, and identity_reputation_contract each use a single Admin: Address pattern (with rotation support only in escrow_contract), while dispute_resolution_contract uses a multi-admin model with per-address boolean storage. This leads to different security properties and inconsistent APIs across the protocol.
@@ -391,8 +392,8 @@ them into one abstraction would have meant either losing multi-admin
 support entirely or forcing every single-admin contract through
 multi-admin's less efficient storage shape. `dispute_resolution_contract`
 keeping its own implementation is treated as an intentional architectural
-boundary, not unaddressed duplication (see Issue #77 disposition in
-`docs/CODEBASE_CLEANUP_PLAN.md`).
+boundary, not unaddressed duplication (see Issue #77's disposition in
+`docs/CODEBASE_FINAL_CLEANUP_REPORT.md`).
 
 `AdminManager` and its `AdminDataKey` enum were deleted from
 `shared_types` accordingly.
