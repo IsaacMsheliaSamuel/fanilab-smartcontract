@@ -660,6 +660,111 @@ fn test_integration_resolve_dispute_split_funds() {
     assert_eq!(driver_balance, 400); // 40% of 1000 paid to driver
 }
 
+/// Issue #51 regression test: `resolve_dispute_refund_sender` is the one path
+/// in the protocol that cross-calls `identity_reputation_contract::
+/// decrease_reputation`, but until now nothing exercised it end-to-end
+/// through real contracts — a full delivery -> escrow -> dispute_resolution
+/// -> identity_reputation chain. This wires all four real contracts together
+/// and asserts the driver's on-chain reputation score actually drops.
+#[test]
+fn test_integration_resolve_dispute_refund_sender_decreases_reputation() {
+    use identity_reputation_contract::{
+        IdentityReputationContract, IdentityReputationContractClient,
+    };
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+
+    // Register real contracts.
+    let delivery_contract_id = env.register(delivery_contract::DeliveryContract, ());
+    let escrow_contract_id = env.register(escrow_contract::EscrowContract, ());
+    let dispute_resolution_id = env.register(DisputeResolutionContract, ());
+    let identity_contract_id = env.register(IdentityReputationContract, ());
+
+    let delivery_client =
+        delivery_contract::DeliveryContractClient::new(&env, &delivery_contract_id);
+    let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
+    let dispute_client = DisputeResolutionContractClient::new(&env, &dispute_resolution_id);
+    let identity_client = IdentityReputationContractClient::new(&env, &identity_contract_id);
+
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    escrow_client.init(&admin, &token, &0);
+    escrow_client.set_dispute_resolution_contract(&admin, &dispute_resolution_id);
+    delivery_client.init(&admin, &escrow_contract_id);
+    dispute_client.init(
+        &admin,
+        &delivery_contract_id,
+        &escrow_contract_id,
+        &86400,
+        &604800,
+    );
+    // Authorizes both delivery_contract and dispute_resolution_contract to
+    // call increase_reputation/decrease_reputation.
+    identity_client.init(&admin, &delivery_contract_id, &dispute_resolution_id);
+    dispute_client.set_identity_reputation_contract(&admin, &identity_contract_id);
+
+    identity_client.register_driver(&driver);
+    assert_eq!(
+        identity_client.get_driver_profile(&driver).reputation_score,
+        50
+    );
+
+    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
+
+    let metadata = {
+        let cargo = shared_types::CargoDescriptor {
+            weight_grams: 500,
+            category: shared_types::CargoCategory::Electronics,
+            fragile: false,
+        };
+        shared_types::DeliveryMetadata {
+            delivery_id: 0,
+            origin: String::from_str(&env, "Origin"),
+            destination: String::from_str(&env, "Destination"),
+            cargo_description: cargo,
+            created_at: env.ledger().timestamp(),
+            estimated_delivery: env.ledger().timestamp() + 3600,
+        }
+    };
+    let delivery_id_val = delivery_client.create_delivery(&sender, &recipient, &metadata);
+
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &u64::from(delivery_id_val),
+        &token,
+        &1000,
+        &None,
+    );
+
+    delivery_client.assign_driver(&admin, &delivery_id_val, &driver);
+    dispute_client.raise_dispute(&sender, &delivery_id_val);
+
+    dispute_client.resolve_dispute_refund_sender(&admin, &delivery_id_val);
+
+    let case = dispute_client.get_dispute(&delivery_id_val);
+    assert_eq!(case.status, DisputeStatus::ResolvedRefund);
+
+    let penalty = dispute_client.get_dispute_reputation_penalty();
+    assert_eq!(
+        identity_client.get_driver_profile(&driver).reputation_score,
+        50 - penalty
+    );
+
+    // The sender got their funds back; the driver's reputation is the only
+    // thing that moved.
+    assert_eq!(TokenClient::new(&env, &token).balance(&sender), 1000);
+}
+
 #[test]
 fn test_resolve_dispute_pay_driver_by_admin() {
     let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =

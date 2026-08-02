@@ -1032,54 +1032,67 @@ fn test_remove_driver_not_signer_but_is_driver() {
 
 // ── Cross-contract integration tests ──────────────────────────────────────────
 
+/// Issue #12 regression test: `get_payout_address` existing in isolation
+/// doesn't prove `escrow_contract::release_escrow` actually routes an active
+/// fleet driver's payout through the fleet treasury instead of paying the
+/// driver directly. This wires real escrow_contract + fleet_management_contract
+/// together and asserts the treasury (not the driver) receives the funds.
 #[test]
-#[ignore]
 fn test_escrow_payout_routes_through_fleet_treasury() {
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
     let env = Env::default();
     env.mock_all_auths();
 
-    // Set up fleet management contract
     let fleet_contract_id = env.register(FleetManagementContract, ());
     let fleet_client = FleetManagementContractClient::new(&env, &fleet_contract_id);
     let fleet_admin = Address::generate(&env);
     fleet_client.init(&fleet_admin);
 
-    // Set up escrow contract
     let escrow_contract_id = env.register(EscrowContract, ());
     let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
     let escrow_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(escrow_admin.clone())
+        .address();
 
-    // Create a mock token contract address (we'll use a generated address as a placeholder)
-    let token = Address::generate(&env);
+    escrow_client.init(&escrow_admin, &token, &0);
+    escrow_client.set_fleet_management_contract(&escrow_admin, &fleet_contract_id);
 
-    // Initialize escrow contract
-    escrow_client.init(&escrow_admin, &token, &500); // 5% platform fee
-
-    // Register a fleet with owner and treasury
     let fleet_owner = Address::generate(&env);
     let fleet_treasury = Address::generate(&env);
     let fleet_id = fleet_client.register_fleet(&fleet_owner, &fleet_treasury);
-    assert_eq!(fleet_id, 1);
 
-    // Add a driver to the fleet
     let driver = Address::generate(&env);
     fleet_client.add_driver_to_fleet(&fleet_owner, &fleet_id, &driver);
-
-    // Driver accepts the invite
     fleet_client.accept_fleet_invite(&fleet_id, &driver);
+    assert_eq!(
+        fleet_client.get_driver_fleet_status(&fleet_id, &driver),
+        Some(DriverFleetStatus::Active)
+    );
+    assert_eq!(
+        fleet_client.get_payout_address(&driver, &fleet_id),
+        fleet_treasury
+    );
 
-    // Verify driver is now active
-    let status = fleet_client.get_driver_fleet_status(&fleet_id, &driver);
-    assert_eq!(status, Some(DriverFleetStatus::Active));
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
 
-    // Verify get_payout_address returns the fleet treasury for active drivers
-    let payout_address = fleet_client.get_payout_address(&driver, &fleet_id);
-    assert_eq!(payout_address, fleet_treasury);
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &42u64,
+        &token,
+        &1000,
+        &Some(fleet_id),
+    );
+    escrow_client.release_escrow(&recipient, &42u64);
 
-    // When escrow_contract calls get_payout_address with this driver and fleet_id,
-    // it should receive the treasury address for routing payouts.
-    // This test verifies the integration point is correctly wired.
-    // The actual payout routing through this address is tested in GitHub #12.
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&fleet_treasury), 1000);
+    assert_eq!(token_client.balance(&driver), 0);
 }
 
 // ── Issue #108 tests — deactivate_fleet ───────────────────────────────────────
