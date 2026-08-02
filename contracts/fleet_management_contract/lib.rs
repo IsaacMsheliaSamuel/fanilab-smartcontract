@@ -1,9 +1,9 @@
 #![no_std]
 
 use shared_types::{
-    events, ttl, DriverInvitedEvent, DriverRemovedEvent, FleetDeactivatedEvent,
+    events, is_admin, ttl, DriverInvitedEvent, DriverRemovedEvent, FleetDeactivatedEvent,
     FleetOwnerReassignedEvent, FleetRegisteredEvent, FleetTreasuryChangeProposedEvent,
-    FleetTreasuryForceUpdatedEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
+    FleetTreasuryForceUpdatedEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent, StorageKey,
 };
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal,
@@ -77,8 +77,6 @@ pub struct PendingTreasuryChange {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// Instance key — stores the contract administrator address.
-    Admin,
     /// Instance key — optional address of the identity_reputation_contract.
     IdentityContract,
     /// Persistent key — monotonically incrementing fleet counter.
@@ -95,22 +93,6 @@ pub enum DataKey {
 
 // ── Contract ──────────────────────────────────────────────────────────────────
 
-/// Returns `true` when `caller` matches the admin stored under
-/// `DataKey::Admin` in instance storage.  Returns `false` — rather than
-/// panicking — when the contract has not yet been initialised, mirroring
-/// `shared_types::is_admin`'s consistent pre-init behaviour (issue #68).
-fn is_fleet_admin(env: &Env, caller: &Address) -> bool {
-    if let Some(admin) = env
-        .storage()
-        .instance()
-        .get::<DataKey, Address>(&DataKey::Admin)
-    {
-        admin == *caller
-    } else {
-        false
-    }
-}
-
 #[contract]
 pub struct FleetManagementContract;
 
@@ -120,10 +102,10 @@ impl FleetManagementContract {
 
     /// Initialise the contract, setting the admin and zeroing the fleet counter.
     pub fn init(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&StorageKey::Admin) {
             panic_with_error!(&env, FleetError::AlreadyInitialized);
         }
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&StorageKey::Admin, &admin);
         env.storage()
             .persistent()
             .set(&DataKey::FleetCounter, &0u64);
@@ -134,7 +116,7 @@ impl FleetManagementContract {
     /// for the fleet owner via a cross-contract call.
     pub fn set_identity_contract(env: Env, admin: Address, identity_contract: Address) {
         admin.require_auth();
-        if !is_fleet_admin(&env, &admin) {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
         env.storage()
@@ -250,7 +232,7 @@ impl FleetManagementContract {
             .get(&fleet_key)
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        if profile.owner != caller && !is_fleet_admin(&env, &caller) {
+        if profile.owner != caller && !is_admin(&env, &caller) {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 
@@ -293,7 +275,7 @@ impl FleetManagementContract {
     ) {
         admin.require_auth();
 
-        if !is_fleet_admin(&env, &admin) {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 
@@ -357,7 +339,7 @@ impl FleetManagementContract {
     ) {
         admin.require_auth();
 
-        if !is_fleet_admin(&env, &admin) {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FleetError::Unauthorized);
         }
 

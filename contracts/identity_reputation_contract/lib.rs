@@ -1,8 +1,9 @@
 #![no_std]
 
 use shared_types::{
-    events, ttl, DriverProfile, DriverRegisteredEvent, FaniLabError, KycStatusUpdatedEvent,
-    ReputationDecreasedEvent, ReputationIncreasedEvent, UserProfile, UserRegisteredEvent,
+    events, is_admin, ttl, DriverProfile, DriverRegisteredEvent, FaniLabError,
+    KycStatusUpdatedEvent, ReputationDecreasedEvent, ReputationIncreasedEvent, StorageKey,
+    UserProfile, UserRegisteredEvent,
 };
 use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
 
@@ -17,7 +18,6 @@ pub struct ReputationConfig {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    Admin,
     UserProfile(Address),
     DriverProfile(Address),
     AuthorizedContract(Address),
@@ -49,11 +49,11 @@ pub struct IdentityReputationContract;
 #[contractimpl]
 impl IdentityReputationContract {
     pub fn init(env: Env, admin: Address, delivery_contract: Address, dispute_contract: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if env.storage().instance().has(&StorageKey::Admin) {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&StorageKey::Admin, &admin);
 
         // Register the initial two authorized contracts through the allowlist so
         // they can be revoked or rotated later without a contract migration.
@@ -68,7 +68,7 @@ impl IdentityReputationContract {
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
-            .get(&DataKey::Admin)
+            .get(&StorageKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized))
     }
 
@@ -79,8 +79,7 @@ impl IdentityReputationContract {
         authorized: bool,
     ) {
         admin.require_auth();
-        let stored_admin = Self::get_admin(env.clone());
-        if admin != stored_admin {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         let key = DataKey::AuthorizedContract(contract_addr);
@@ -93,8 +92,7 @@ impl IdentityReputationContract {
 
     pub fn set_reputation_config(env: Env, admin: Address, config: ReputationConfig) {
         admin.require_auth();
-        let stored_admin = Self::get_admin(env.clone());
-        if admin != stored_admin {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         env.storage()
@@ -115,8 +113,7 @@ impl IdentityReputationContract {
 
     pub fn set_delivery_contract(env: Env, admin: Address, delivery_contract: Address) {
         admin.require_auth();
-        let stored_admin = Self::get_admin(env.clone());
-        if admin != stored_admin {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         env.storage()
@@ -126,8 +123,7 @@ impl IdentityReputationContract {
 
     pub fn set_dispute_contract(env: Env, admin: Address, dispute_contract: Address) {
         admin.require_auth();
-        let stored_admin = Self::get_admin(env.clone());
-        if admin != stored_admin {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
         env.storage()
@@ -246,13 +242,7 @@ impl IdentityReputationContract {
     pub fn update_driver_kyc_status(env: Env, admin: Address, driver: Address, kyc_verified: bool) {
         admin.require_auth();
 
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
-
-        if admin != stored_admin {
+        if !is_admin(&env, &admin) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 

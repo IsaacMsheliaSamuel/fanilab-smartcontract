@@ -596,9 +596,16 @@ pub fn escrow_key(id: impl Into<DeliveryId>) -> StorageKey {
 /// `StorageKey::Admin` in **instance** storage.
 ///
 /// Returns `false` — rather than panicking — when the contract has not yet
-/// been initialised.  This is intentional: both `escrow_contract` and
-/// `delivery_contract` share this single source-of-truth so the pre-init
-/// behaviour is always consistent (ADR-003).
+/// been initialised.  This is intentional: `escrow_contract`,
+/// `delivery_contract`, `fleet_management_contract`, and
+/// `identity_reputation_contract` all share this single source-of-truth so
+/// the pre-init behaviour is always consistent (ADR-003).
+///
+/// `dispute_resolution_contract` is the one exception: it supports multiple
+/// simultaneous admins with a last-admin-removal guard, a genuinely
+/// different governance model this single-admin helper cannot express, so
+/// it keeps its own `DataKey::Admin(Address)` + `DataKey::AdminList`
+/// implementation rather than being forced onto this function (Issue #77).
 pub fn is_admin(env: &soroban_sdk::Env, caller: &soroban_sdk::Address) -> bool {
     if let Some(admin) = env
         .storage()
@@ -1074,71 +1081,4 @@ pub struct DeliveryMetadata {
     pub cargo_description: CargoDescriptor,
     pub created_at: u64,
     pub estimated_delivery: u64,
-}
-
-pub mod governance {
-    use soroban_sdk::{contracttype, Address, Env, Vec};
-
-    #[contracttype]
-    #[derive(Clone)]
-    pub enum AdminDataKey {
-        SingleAdmin,
-        AdminSet,
-    }
-
-    pub struct AdminManager;
-
-    impl AdminManager {
-        pub fn is_single_admin(env: &Env, caller: &Address, storage_key: &AdminDataKey) -> bool {
-            if let Some(admin) = env.storage().instance().get::<_, Address>(storage_key) {
-                *caller == admin
-            } else {
-                false
-            }
-        }
-
-        pub fn is_multi_admin(env: &Env, caller: &Address, storage_key: &AdminDataKey) -> bool {
-            if let Some(admins) = env.storage().instance().get::<_, Vec<Address>>(storage_key) {
-                admins.iter().any(|a| a == *caller)
-            } else {
-                false
-            }
-        }
-
-        pub fn list_admins(env: &Env, storage_key: &AdminDataKey) -> Vec<Address> {
-            env.storage()
-                .instance()
-                .get::<_, Vec<Address>>(storage_key)
-                .unwrap_or_else(|| Vec::new(env))
-        }
-
-        pub fn add_admin_to_set(env: &Env, new_admin: Address, storage_key: &AdminDataKey) {
-            let mut admins: Vec<Address> = env
-                .storage()
-                .instance()
-                .get(storage_key)
-                .unwrap_or_else(|| Vec::new(env));
-
-            if !admins.iter().any(|a| a == new_admin) {
-                admins.push_back(new_admin);
-                env.storage().instance().set(storage_key, &admins);
-            }
-        }
-
-        pub fn remove_admin_from_set(env: &Env, old_admin: Address, storage_key: &AdminDataKey) {
-            let admins: Vec<Address> = env
-                .storage()
-                .instance()
-                .get(storage_key)
-                .unwrap_or_else(|| Vec::new(env));
-
-            let mut new_admins = Vec::new(env);
-            for admin in admins.iter() {
-                if admin != old_admin {
-                    new_admins.push_back(admin);
-                }
-            }
-            env.storage().instance().set(storage_key, &new_admins);
-        }
-    }
 }

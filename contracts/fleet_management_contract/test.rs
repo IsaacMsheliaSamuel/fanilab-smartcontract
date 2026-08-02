@@ -58,7 +58,7 @@ fn test_init_sets_admin_and_counter() {
     let (env, client, admin) = setup_test();
 
     let stored_admin: Address = env.as_contract(&client.address, || {
-        env.storage().instance().get(&DataKey::Admin).unwrap()
+        env.storage().instance().get(&StorageKey::Admin).unwrap()
     });
     assert_eq!(stored_admin, admin);
 
