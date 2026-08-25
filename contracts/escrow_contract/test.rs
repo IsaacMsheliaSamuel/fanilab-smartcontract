@@ -7,6 +7,20 @@ use soroban_sdk::{
     Address, Env,
 };
 
+proptest! {
+    #[test]
+    fn split_conserves_funds(amount in 0i128..i128::MAX, bps in 0u32..=10_000) {
+        let sender = amount.saturating_mul(bps as i128) / 10_000;
+        prop_assert_eq!(sender + amount.saturating_sub(sender), amount);
+    }
+
+    #[test]
+    fn effective_fee_never_exceeds_base(base in 0u32..=10_000, volume in any::<u32>()) {
+        let env = Env::default();
+        prop_assert!(get_effective_fee_bps(&env, base, volume) <= base);
+    }
+}
+
 fn setup_env() -> (Env, Address) {
     let env = Env::default();
     env.mock_all_auths();

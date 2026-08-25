@@ -1,10 +1,22 @@
 extern crate std;
 
 use super::*;
+use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Address, Env, String, Symbol,
 };
+
+proptest! {
+    #[test]
+    fn transition_matrix_is_exact(from in 0u8..6, to in 0u8..6) {
+        let states = [DeliveryStatus::Pending, DeliveryStatus::Active,
+            DeliveryStatus::InTransit, DeliveryStatus::Delivered,
+            DeliveryStatus::Disputed, DeliveryStatus::Cancelled];
+        let expected = matches!((from, to), (0,1)|(0,5)|(1,2)|(1,4)|(1,5)|(2,3)|(2,4)|(3,4)|(4,3));
+        prop_assert_eq!(validate_transition(states[from as usize], states[to as usize]).is_ok(), expected);
+    }
+}
 
 // ── Issue #95: State Rollback on Escrow Failure ──────────────────────────────────────────────────
 // This module implements comprehensive testing for the contract's safety invariant:
