@@ -17,17 +17,49 @@ Locked ──► Released
   │
   ├──► Refunded
   │
+  ├──► Holdback ──► Released
+  │        │
+  │        └──► Paused
+  │
   └──► Paused ──► Released
-                  └──► Refunded
+              ├──► Refunded
+              └──► Split
 ```
 
 | State       | Meaning                                                          |
 |-------------|------------------------------------------------------------------|
 | `Locked`    | Funds are held in the contract. Delivery is pending/active/in-transit. |
+| `Holdback`  | The recipient has confirmed delivery. Funds are held pending release to the driver. |
 | `Released`  | Funds have been paid out to the driver (or fleet treasury). Terminal.   |
 | `Refunded`  | Funds have been returned to the sender. Terminal.                      |
 | `Paused`    | Funds are frozen due to an active dispute.                             |
-| `Holdback`  | A portion of funds is held back temporarily (e.g., for dispute window).|
+| `Split`     | Funds were divided between sender and driver by dispute resolution. Terminal. |
+
+`Holdback` is entered only via `mark_holdback_escrow`, which only the
+recipient may call and which `delivery_contract::confirm_delivery` invokes on
+confirmation. Reaching it means the driver has performed and has been credited
+reputation for the delivery, so the funds are earmarked for them.
+
+### Refund Authorization Invariant
+
+Which states permit a refund, and who may trigger it, is deliberately
+asymmetric:
+
+| Escrow state | Sender may refund | Admin may refund |
+|--------------|-------------------|------------------|
+| `Locked`     | Yes — pre-confirmation cancellation | Yes |
+| `Holdback`   | **No** | Yes (arbitration) |
+| `Paused`     | **No** | Yes (dispute resolution) |
+| `Released` / `Refunded` / `Split` | No — terminal | No — terminal |
+
+The sender's unilateral refund is confined to `Locked`. Once an escrow has
+moved past that — either because the recipient confirmed delivery
+(`Holdback`) or because a dispute was raised (`Paused`) — returning the funds
+to the sender is an arbitration outcome, not a sender privilege, and
+`refund_escrow` requires the admin. This keeps a confirmed delivery's payment
+protected: from `Holdback` the escrow can only settle to the driver via
+`release_holdback_escrow`, be frozen for dispute via `freeze_funds`, or be
+resolved by an admin.
 
 ### Escrow Record Structure
 
@@ -82,9 +114,13 @@ Before payout, the function:
 Emits an `escrow_released` event.
 
 ### `refund_escrow(env, caller, delivery_id)`
-Refunds locked funds to the original sender. Authorized callers:
-- The **delivery contract** (when delivery is cancelled)
-- The **dispute resolution contract** (when a dispute is resolved for a refund)
+Refunds escrowed funds to the original sender. Valid only from `Locked`,
+`Holdback` or `Paused`; any other state is rejected with `InvalidState`.
+
+Authorized callers depend on the state, per the refund authorization invariant
+above:
+- From `Locked`: the **sender** (this is the path `delivery_contract::cancel_delivery` uses) or the **admin**
+- From `Holdback` or `Paused`: the **admin** only
 
 Transfers the full amount back to the sender and sets status to `Refunded`.
 Emits an `escrow_refunded` event.

@@ -2071,3 +2071,438 @@ fn test_freeze_funds_unauthorized_caller_rejected() {
     }
     assert_eq!(client.get_escrow(&910u64).status, EscrowStatus::Locked);
 }
+
+// ── Holdback refund invariant ────────────────────────────────────────────────
+//
+// `Holdback` is reached only through `mark_holdback_escrow`, which only the
+// recipient may call and which `delivery_contract::confirm_delivery` invokes
+// when the recipient confirms the goods arrived. At that point the driver has
+// performed and has been credited reputation, so the escrow is earmarked for
+// them. The security invariant these tests pin down:
+//
+//   Once an escrow is in `Holdback`, the sender can never unilaterally
+//   reclaim it. Only `release_holdback_escrow` (to the driver) or an
+//   admin/dispute arbitration outcome may move the funds.
+//
+// Refunds from `Locked` (pre-confirmation cancellation) are untouched.
+
+/// Wires the real delivery_contract, escrow_contract and
+/// identity_reputation_contract together and drives a delivery all the way
+/// through recipient confirmation — the only transition that puts an escrow
+/// into `Holdback` and credits the driver's reputation.
+///
+/// Returns `(env, escrow_id, identity_id, token, admin, sender, driver, delivery_id)`
+/// with the escrow sitting in `Holdback`.
+#[allow(clippy::type_complexity)]
+fn setup_confirmed_delivery_in_holdback(
+    amount: i128,
+) -> (
+    Env,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+    u64,
+) {
+    let env = Env::default();
+    // delivery_contract::create_delivery cross-calls
+    // identity_reputation_contract::register_user, so the harness must permit
+    // authorization below the root invocation.
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+
+    let delivery_contract_id = env.register(delivery_contract::DeliveryContract, ());
+    let escrow_contract_id = env.register(EscrowContract, ());
+    let identity_contract_id =
+        env.register(identity_reputation_contract::IdentityReputationContract, ());
+
+    let delivery_client =
+        delivery_contract::DeliveryContractClient::new(&env, &delivery_contract_id);
+    let escrow_client = EscrowContractClient::new(&env, &escrow_contract_id);
+    let identity_client = identity_reputation_contract::IdentityReputationContractClient::new(
+        &env,
+        &identity_contract_id,
+    );
+
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    escrow_client.init(&admin, &token, &0);
+    delivery_client.init(&admin, &escrow_contract_id);
+    // Only delivery_contract needs authority to call increase_reputation here;
+    // the dispute_resolution_contract slot is unused by this flow.
+    identity_client.init(&admin, &delivery_contract_id, &Address::generate(&env));
+    delivery_client.set_identity_reputation_contract(&admin, &identity_contract_id);
+
+    identity_client.register_driver(&driver);
+    mint(&env, &token, &sender, amount);
+
+    let metadata = shared_types::DeliveryMetadata {
+        delivery_id: 0,
+        origin: soroban_sdk::String::from_str(&env, "Origin"),
+        destination: soroban_sdk::String::from_str(&env, "Destination"),
+        cargo_description: shared_types::CargoDescriptor {
+            weight_grams: 500,
+            category: shared_types::CargoCategory::Electronics,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 3600,
+    };
+
+    let delivery_id = delivery_client.create_delivery(&sender, &recipient, &metadata);
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &u64::from(delivery_id),
+        &token,
+        &amount,
+        &None,
+    );
+
+    delivery_client.assign_driver(&admin, &delivery_id, &driver);
+    delivery_client.mark_in_transit(&driver, &delivery_id);
+    delivery_client.confirm_delivery(&recipient, &delivery_id);
+
+    (
+        env,
+        escrow_contract_id,
+        identity_contract_id,
+        token,
+        admin,
+        sender,
+        driver,
+        u64::from(delivery_id),
+    )
+}
+
+/// Escrow-only equivalent of the above: drives a single escrow into
+/// `Holdback` through `mark_holdback_escrow`, which is exactly the call
+/// `delivery_contract::confirm_delivery` makes.
+#[allow(clippy::type_complexity)]
+fn setup_holdback_escrow(
+    delivery_id: u64,
+    amount: i128,
+) -> (Env, Address, Address, Address, Address, Address, Address) {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, amount);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &token,
+        &amount,
+        &None,
+    );
+    client.mark_holdback_escrow(&recipient, &delivery_id);
+
+    (env, contract_id, token, admin, sender, recipient, driver)
+}
+
+/// The exact reported exploit, end-to-end through the real delivery ->
+/// escrow -> identity_reputation chain.
+///
+/// Before the fix this call succeeded: the sender's balance was fully
+/// restored, the driver was never paid, and the reputation credited during
+/// `confirm_delivery` stayed credited — a free delivery plus reputation
+/// farming. `refund_escrow` accepted `Holdback` as a refundable state while
+/// gating only `Paused` behind the admin check, so the plain sender passed
+/// both the authorization and the state check.
+#[test]
+fn test_sender_cannot_refund_escrow_after_delivery_confirmed() {
+    let (env, escrow_id, identity_id, token, admin, sender, driver, delivery_id) =
+        setup_confirmed_delivery_in_holdback(1000);
+    let escrow_client = EscrowContractClient::new(&env, &escrow_id);
+    let identity_client =
+        identity_reputation_contract::IdentityReputationContractClient::new(&env, &identity_id);
+
+    // Recipient confirmation put the escrow in Holdback and credited the
+    // driver's reputation for the completed delivery.
+    assert_eq!(
+        escrow_client.get_escrow(&delivery_id).status,
+        EscrowStatus::Holdback
+    );
+    let profile_before = identity_client.get_driver_profile(&driver);
+    assert!(profile_before.reputation_score > 50);
+    assert_eq!(profile_before.deliveries_completed, 1);
+
+    // The attack: the plain sender tries to reclaim the whole escrow.
+    let result = escrow_client.try_refund_escrow(&sender, &delivery_id);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+
+    // Nothing moved: the escrow is still Holdback and the funds are still
+    // in custody, earmarked for the driver.
+    assert_eq!(
+        escrow_client.get_escrow(&delivery_id).status,
+        EscrowStatus::Holdback
+    );
+    assert_eq!(balance(&env, &token, &sender), 0);
+    assert_eq!(balance(&env, &token, &driver), 0);
+    assert_eq!(balance(&env, &token, &escrow_id), 1000);
+    assert_eq!(escrow_client.get_total_locked(&token), 1000);
+
+    // The accounting invariant the report flagged now holds: the reputation
+    // credited at confirmation is backed by an actual payment, because the
+    // escrow can still only settle to the driver.
+    escrow_client.release_holdback_escrow(&admin, &delivery_id);
+    assert_eq!(
+        escrow_client.get_escrow(&delivery_id).status,
+        EscrowStatus::Released
+    );
+    assert_eq!(balance(&env, &token, &driver), 1000);
+    assert_eq!(balance(&env, &token, &sender), 0);
+    assert_eq!(escrow_client.get_total_locked(&token), 0);
+    let profile_after = identity_client.get_driver_profile(&driver);
+    assert_eq!(
+        profile_after.reputation_score,
+        profile_before.reputation_score
+    );
+}
+
+/// Contract-level counterpart of the exploit test, with no delivery_contract
+/// in the loop: `mark_holdback_escrow` is the only way into `Holdback`, and a
+/// sender refund from there must be rejected on-chain regardless of which
+/// caller drove the transition.
+#[test]
+fn test_sender_cannot_refund_holdback_escrow() {
+    let (env, contract_id, token, _admin, sender, _recipient, _driver) =
+        setup_holdback_escrow(920, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let result = client.try_refund_escrow(&sender, &920u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+
+    assert_eq!(client.get_escrow(&920u64).status, EscrowStatus::Holdback);
+    assert_eq!(balance(&env, &token, &sender), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 500);
+    assert_eq!(client.get_total_locked(&token), 500);
+}
+
+/// Authorization boundary: `Holdback` is admin-only for refunds, so neither
+/// the recipient, the driver, nor an unrelated address may refund either.
+/// The recipient in particular must not be able to confirm delivery and then
+/// hand the money back to the sender behind the driver's back.
+#[test]
+fn test_non_admin_callers_cannot_refund_holdback_escrow() {
+    let (env, contract_id, token, _admin, _sender, recipient, driver) =
+        setup_holdback_escrow(921, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let stranger = Address::generate(&env);
+
+    for caller in [recipient, driver, stranger] {
+        let result = client.try_refund_escrow(&caller, &921u64);
+        match result {
+            Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+            _ => panic!("Expected FaniLabError::Unauthorized"),
+        }
+    }
+
+    assert_eq!(client.get_escrow(&921u64).status, EscrowStatus::Holdback);
+    assert_eq!(client.get_total_locked(&token), 500);
+}
+
+/// The admin arbitration path out of `Holdback` is preserved: the fix closes
+/// the unilateral sender refund without disabling refunds. This mirrors the
+/// admin gate already applied to `Paused` escrows (Issue #93).
+#[test]
+fn test_admin_can_still_refund_holdback_escrow() {
+    let (env, contract_id, token, admin, sender, _recipient, _driver) =
+        setup_holdback_escrow(922, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.refund_escrow(&admin, &922u64);
+
+    assert_eq!(client.get_escrow(&922u64).status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 500);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+/// The normal settlement path out of `Holdback` still pays the driver, with
+/// the platform fee split intact.
+#[test]
+fn test_release_holdback_escrow_still_pays_driver_after_fix() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &500);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(&sender, &recipient, &driver, &923u64, &token, &1000, &None);
+    client.mark_holdback_escrow(&recipient, &923u64);
+
+    client.release_holdback_escrow(&recipient, &923u64);
+
+    assert_eq!(client.get_escrow(&923u64).status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 950);
+    assert_eq!(balance(&env, &token, &admin), 50);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+/// The dispute path out of `Holdback` is preserved end-to-end: the
+/// dispute_resolution_contract can still freeze a confirmed-but-contested
+/// escrow, and the admin can then arbitrate it to a refund. This is the
+/// legitimate way a sender gets their money back after delivery confirmation.
+#[test]
+fn test_holdback_escrow_can_be_frozen_and_refunded_through_dispute() {
+    let (env, contract_id, token, admin, sender, _recipient, _driver) =
+        setup_holdback_escrow(924, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let dispute_contract = Address::generate(&env);
+    client.set_dispute_resolution_contract(&admin, &dispute_contract);
+
+    client.freeze_funds(&dispute_contract, &924u64);
+    assert_eq!(client.get_escrow(&924u64).status, EscrowStatus::Paused);
+
+    // Even frozen, the sender still cannot self-refund (Issue #93 gate).
+    let result = client.try_refund_escrow(&sender, &924u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+
+    client.resolve_dispute(&admin, &924u64, &false);
+    assert_eq!(client.get_escrow(&924u64).status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 500);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+/// Non-regression: the pre-confirmation refund path is untouched. A sender
+/// may still reclaim a `Locked` escrow directly, which is what
+/// `delivery_contract::cancel_delivery` relies on.
+#[test]
+fn test_sender_can_still_refund_locked_escrow_after_fix() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 500);
+    client.create_escrow(&sender, &recipient, &driver, &925u64, &token, &500, &None);
+
+    client.refund_escrow(&sender, &925u64);
+
+    assert_eq!(client.get_escrow(&925u64).status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 500);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+/// Non-regression: the sender-initiated cancellation refund still works
+/// through the real delivery_contract, which calls `refund_escrow` with the
+/// sender as caller while the escrow is still `Locked`.
+#[test]
+fn test_delivery_cancellation_still_refunds_sender_after_fix() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+
+    let delivery_contract_id = env.register(delivery_contract::DeliveryContract, ());
+    let escrow_contract_id = env.register(EscrowContract, ());
+    let delivery_client =
+        delivery_contract::DeliveryContractClient::new(&env, &delivery_contract_id);
+    let escrow_client = EscrowContractClient::new(&env, &escrow_contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    escrow_client.init(&admin, &token, &0);
+    delivery_client.init(&admin, &escrow_contract_id);
+    mint(&env, &token, &sender, 800);
+
+    let metadata = shared_types::DeliveryMetadata {
+        delivery_id: 0,
+        origin: soroban_sdk::String::from_str(&env, "Origin"),
+        destination: soroban_sdk::String::from_str(&env, "Destination"),
+        cargo_description: shared_types::CargoDescriptor {
+            weight_grams: 500,
+            category: shared_types::CargoCategory::Electronics,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 3600,
+    };
+
+    let delivery_id = delivery_client.create_delivery(&sender, &recipient, &metadata);
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &u64::from(delivery_id),
+        &token,
+        &800,
+        &None,
+    );
+    delivery_client.assign_driver(&admin, &delivery_id, &driver);
+
+    delivery_client.cancel_delivery(&sender, &delivery_id);
+
+    assert_eq!(
+        escrow_client.get_escrow(&u64::from(delivery_id)).status,
+        EscrowStatus::Refunded
+    );
+    assert_eq!(balance(&env, &token, &sender), 800);
+    assert_eq!(escrow_client.get_total_locked(&token), 0);
+}
+
+/// Documents the one route from `Holdback` into `Paused`: `raise_dispute`
+/// only accepts `Locked`, so a confirmed-delivery escrow can be contested
+/// only through `freeze_funds`, which the dispute_resolution_contract calls.
+/// Worth pinning because it is what makes the admin refund the sole
+/// arbitration exit from `Holdback` when no dispute contract is configured.
+#[test]
+fn test_raise_dispute_rejected_on_holdback_escrow() {
+    let (env, contract_id, _token, _admin, sender, recipient, driver) =
+        setup_holdback_escrow(926, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    for caller in [sender, recipient, driver] {
+        let result = client.try_raise_dispute(&caller, &926u64);
+        match result {
+            Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
+            _ => panic!("Expected EscrowError::InvalidState"),
+        }
+    }
+
+    assert_eq!(client.get_escrow(&926u64).status, EscrowStatus::Holdback);
+}

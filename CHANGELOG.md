@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `delivery_contract::get_escrow_contract` — a read-only getter for the configured escrow contract address, matching the equivalent getter every other contract that stores a peer-contract address already had
 - Regression tests proving the FA-2 dispute-resolution-bypass fix holds: an unauthorized caller cannot invoke `escrow_contract::freeze_funds`, and `delivery_contract::cancel_delivery` is rejected once a delivery has reached `Disputed`
 - Cross-contract integration tests: a full delivery → escrow → dispute_resolution → identity_reputation chain asserting a driver's reputation score actually decreases on `resolve_dispute_refund_sender`, and a full escrow → fleet_management chain asserting an active fleet driver's payout is routed to the fleet treasury rather than the driver directly
+- Regression tests for the `Holdback` refund invariant, including a full delivery → escrow → identity_reputation chain that confirms a delivery, asserts the escrow reaches `Holdback` with the driver's reputation credited, and proves the sender can no longer reclaim the funds — plus coverage that the admin refund, dispute/freeze, holdback release, and `Locked`-state refund paths all still work
 
 ### Changed
 - `fleet_management_contract` and `identity_reputation_contract` now use `shared_types::is_admin`/`StorageKey::Admin` instead of their own local single-admin helpers, matching `escrow_contract` and `delivery_contract` (see ADR-011's addendum for why `shared_types::governance::AdminManager` was removed instead of adopted)
@@ -55,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Delivery transit status tracking
 
 ### Security
+- **`escrow_contract::refund_escrow` now treats `Holdback` as an admin-only refund state.** Once the recipient confirms delivery, `delivery_contract::confirm_delivery` moves the escrow to `Holdback` and the driver is credited reputation for the completed delivery. `refund_escrow` accepted `Holdback` as a refundable state but gated only `Paused` behind the admin check, so the sender could still call it directly on the escrow contract and reclaim the full amount after taking delivery — leaving the driver unpaid while their reputation credit stood. `Holdback` is now gated exactly like `Paused` (Issue #93 / FA-2): the admin arbitration and dispute paths out of `Holdback` are unchanged, and refunds from `Locked` — including `delivery_contract::cancel_delivery` — are unaffected
 - Added balance verification before transfers
 - Implemented checks-effects-interactions pattern
 - Enhanced access control on admin functions

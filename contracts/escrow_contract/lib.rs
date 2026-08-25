@@ -919,12 +919,25 @@ impl EscrowContract {
         let mut record = load_escrow(&env, delivery_id);
         let admin_authorized = is_admin(&env, &caller);
         let sender_authorized = caller == record.sender;
-        // A Paused escrow is under active dispute: only an admin may refund
-        // it, via this typed-error path (mirroring resolve_dispute's own
-        // admin gate). Letting the sender self-refund here would bypass
-        // dispute resolution entirely and let them race the outcome the
-        // admin/dispute_resolution_contract is meant to decide (Issue #93).
-        if record.status == EscrowStatus::Paused {
+        // Two states are past the point where the sender may unilaterally
+        // reclaim the funds, so both are admin-only refunds:
+        //
+        // - `Paused`: the escrow is under active dispute. Letting the sender
+        //   self-refund here would bypass dispute resolution entirely and let
+        //   them race the outcome the admin/dispute_resolution_contract is
+        //   meant to decide (Issue #93).
+        // - `Holdback`: the recipient has already confirmed delivery (this is
+        //   the only transition into `Holdback`, via `mark_holdback_escrow`),
+        //   so the driver has performed and the funds are earmarked for them
+        //   pending `release_holdback_escrow`. A sender self-refund here would
+        //   let them take back the full amount after the goods were delivered
+        //   and after the driver was credited reputation for the delivery,
+        //   leaving the driver unpaid. Clawing an escrow back after delivery
+        //   confirmation is an arbitration outcome, not a sender privilege.
+        //
+        // In both cases an admin may still refund, so the protocol keeps its
+        // recovery path; only the unilateral sender path is closed.
+        if record.status == EscrowStatus::Paused || record.status == EscrowStatus::Holdback {
             if !admin_authorized {
                 panic_with_error!(&env, FaniLabError::Unauthorized);
             }
