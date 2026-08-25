@@ -114,7 +114,7 @@ Builds naturally on #227's fleet configuration coverage, but can be written inde
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 
 ---
@@ -211,7 +211,7 @@ Related to #227's fleet-routing coverage; either can land first.
 
 ## Labels
 
-`enhancement`, `Stellar Wave`
+`enhancement`
 
 
 ---
@@ -317,7 +317,7 @@ than expanding this issue.
 
 ## Labels
 
-`refactor`, `Stellar Wave`
+`refactor`
 
 
 ---
@@ -436,7 +436,7 @@ missing provisioning step that makes the workflow non-functional.
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 
 ---
@@ -533,7 +533,7 @@ exactly, matching CI.
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 
 ---
@@ -633,7 +633,7 @@ policy so future additions follow it.
 
 ## Labels
 
-`security`, `Stellar Wave`
+`security`
 
 
 ---
@@ -729,7 +729,7 @@ Best sequenced alongside #243, since both harden the same job.
 
 ## Labels
 
-`security`, `Stellar Wave`
+`security`
 
 
 ---
@@ -825,7 +825,7 @@ titles are worth preserving, but deriving the list from reality is the point.
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 
 ---
@@ -927,7 +927,7 @@ three identifiers are no longer ambiguous.
 
 ## Labels
 
-`enhancement`, `security`, `Stellar Wave`
+`enhancement`, `security`
 
 
 ---
@@ -1029,7 +1029,7 @@ Practically verifiable only once #241 makes the workflow able to reach this step
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 
 ---
@@ -1116,7 +1116,7 @@ running it always is simpler and the package is small.
 
 ## Labels
 
-`test`, `enhancement`, `Stellar Wave`
+`test`, `enhancement`
 
 
 ---
@@ -1217,7 +1217,7 @@ Complements #248 (CI job) and #223 (the proposed first test); each is independen
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 
 ---
@@ -1318,7 +1318,7 @@ Documentation change; verification is by review against the source:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -1411,7 +1411,7 @@ Documentation change; verification is by review against source:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -1505,7 +1505,7 @@ Documentation change; verification by review against source:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -1605,7 +1605,7 @@ Documentation change; verification by review against source:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -1692,7 +1692,7 @@ Should be sequenced with #252 to avoid conflicting edits to the same section.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -1808,7 +1808,7 @@ Documentation change; verification by review against source:
 
 ## Labels
 
-`documentation`, `security`, `Stellar Wave`
+`documentation`, `security`
 
 
 ---
@@ -1908,7 +1908,7 @@ Documentation change; verification by enumeration against source:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -2012,7 +2012,7 @@ Related to #232 (implementing protocol-wide pause) and #268 (unintended exemptio
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -2122,7 +2122,7 @@ Should be consistent with #256; either can land first.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -2218,7 +2218,7 @@ Overlaps #258 in the same document section; sequence to avoid conflicting edits.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -2326,7 +2326,7 @@ documentation would prove the recipe and give contributors a template.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -2441,7 +2441,7 @@ though this should be verified.
 
 ## Labels
 
-`security`, `bug`, `Stellar Wave`
+`security`, `bug`
 
 
 ---
@@ -2552,7 +2552,7 @@ Related to #232 (protocol-wide pause) and #197 (sweep visibility), but independe
 
 ## Labels
 
-`security`, `Stellar Wave`
+`security`
 
 
 ---
@@ -2659,7 +2659,7 @@ Builds on the invocation layer from #222; if that has not landed, new methods sh
 
 ## Labels
 
-`feature`, `Stellar Wave`
+`feature`
 
 
 ---
@@ -2765,7 +2765,7 @@ outright.
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 
 ---
@@ -2866,7 +2866,7 @@ Touches the same function as #211; sequence to avoid conflicting edits.
 
 ## Labels
 
-`refactor`, `Stellar Wave`
+`refactor`
 
 
 ---
@@ -2964,7 +2964,7 @@ rather than an assumption.
 
 ## Labels
 
-`refactor`, `Stellar Wave`
+`refactor`
 
 
 ---
@@ -3075,7 +3075,7 @@ Should land before or alongside #220 and #221, which add settlement tests.
 
 ## Labels
 
-`refactor`, `Stellar Wave`
+`refactor`
 
 
 ---
@@ -3176,7 +3176,7 @@ Scoped to avoid overlap with #226 (index accessors) and #227 (fleet configuratio
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 
 ---
@@ -3277,7 +3277,7 @@ Scoped to avoid overlap with #202 (`get_driver_profile`) and #226 (escrow indexe
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 
 ---
@@ -3379,7 +3379,7 @@ expanding this one — this issue is scoped to coverage of existing behavior.
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 
 ---
@@ -3500,7 +3500,7 @@ Interacts with #190 (single-source fee computation); either can land first, but 
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 
 ---
@@ -3615,7 +3615,7 @@ Shares a function with #188, #189, and #196 — coordinate ordering.
 
 ## Labels
 
-`bug`, `enhancement`, `Stellar Wave`
+`bug`, `enhancement`
 
 
 ---
@@ -3721,7 +3721,7 @@ Touches `create_escrows_batch` alongside #188, #189, #196, and #272 — coordina
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 
 ---
@@ -3825,7 +3825,7 @@ Coordinate with #204, which changes the batch path's event emission.
 
 ## Labels
 
-`refactor`, `Stellar Wave`
+`refactor`
 
 
 ---
@@ -3932,7 +3932,7 @@ Complements #248 (CI build) and #264 (SDK packaging); each is independently land
 
 ## Labels
 
-`security`, `enhancement`, `Stellar Wave`
+`security`, `enhancement`
 
 
 ---
@@ -4040,7 +4040,7 @@ Practically testable in CI only after #241; the script logic can be developed an
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 
 ---
@@ -4155,7 +4155,7 @@ Related to #217 but addresses a distinct failure mode; both are independently so
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 
 ---
@@ -4255,7 +4255,7 @@ failing for an unknown fleet.
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 
 ---
@@ -4357,7 +4357,7 @@ Interacts with #214, which changes what `init` stores; adjust the pre-configurat
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 
 ---
@@ -4460,7 +4460,7 @@ Should be reconciled with #260 so measurement guidance is not duplicated.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -4574,7 +4574,7 @@ Decide the `sender == recipient` rule jointly with #201 so the two contracts agr
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 
 ---
@@ -4680,7 +4680,7 @@ Should adopt the same convention as #222; independently landable if #222 has not
 
 ## Labels
 
-`documentation`, `bug`, `Stellar Wave`
+`documentation`, `bug`
 
 
 ---
@@ -4788,7 +4788,7 @@ Documentation change; verification by comparison:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 
 ---
@@ -4894,7 +4894,7 @@ Makes #246's release-time version check simpler; either can land first.
 
 ## Labels
 
-`refactor`, `Stellar Wave`
+`refactor`
 
 
 ---
@@ -5018,7 +5018,7 @@ Coordinate with #229 (which corrects the design doc's claim about this field) an
 
 ## Labels
 
-`refactor`, `enhancement`, `Stellar Wave`
+`refactor`, `enhancement`
 
 
 ---
@@ -5127,7 +5127,7 @@ Touches the same function as #261; sequence to avoid conflicts.
 
 ## Labels
 
-`refactor`, `security`, `Stellar Wave`
+`refactor`, `security`
 
 
 ---
@@ -5243,7 +5243,7 @@ Same class as #196 and #204; the three could share a convention but are in diffe
 
 ## Labels
 
-`bug`, `refactor`, `Stellar Wave`
+`bug`, `refactor`
 
 
 ---
@@ -5360,7 +5360,7 @@ cross-contract call that contract does not currently make for this purpose.
 
 ## Labels
 
-`feature`, `Stellar Wave`
+`feature`
 
 
 ---
@@ -5472,7 +5472,7 @@ the mutating functions use.
 
 ## Labels
 
-`performance`, `refactor`, `Stellar Wave`
+`performance`, `refactor`
 
 
 ---
@@ -5583,7 +5583,7 @@ Interacts with #190 (fee computation) and #189 (batch amount validation); indepe
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 
 ---
@@ -5697,7 +5697,7 @@ As defense in depth, add a duplicate guard to `create_delivery` mirroring
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 ---
 
@@ -5820,7 +5820,7 @@ For post-delivery disputes the driver path also requires #193; pre-delivery disp
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 ---
 
@@ -5936,7 +5936,7 @@ decision rather than a side effect of the missing `else`.
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 ---
 
@@ -6050,7 +6050,7 @@ Conceptually paired with #295; each is independently solvable.
 
 ## Labels
 
-`bug`, `enhancement`, `Stellar Wave`
+`bug`, `enhancement`
 
 ---
 
@@ -6166,7 +6166,7 @@ Conceptually paired with #294; each is independently solvable.
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 ---
 
@@ -6282,7 +6282,7 @@ Related to #217 and #272; each addresses a different aspect of fleet routing and
 
 ## Labels
 
-`security`, `bug`, `Stellar Wave`
+`security`, `bug`
 
 ---
 
@@ -6385,7 +6385,7 @@ Benefits from #311's existence accessor and #231's realistic mock; solvable with
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 ---
 
@@ -6486,7 +6486,7 @@ allowed the gap to persist through one round of fixes.
 
 ## Labels
 
-`bug`, `security`, `Stellar Wave`
+`bug`, `security`
 
 ---
 
@@ -6593,7 +6593,7 @@ Shares the escrow → delivery wiring question with #294; the two should agree o
 
 ## Labels
 
-`bug`, `Stellar Wave`
+`bug`
 
 ---
 
@@ -6687,7 +6687,7 @@ and #273 land rather than blocking on them.
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 ---
 
@@ -6783,7 +6783,7 @@ and the delivery counter's reset behavior is itself a concern (issue #291).
 
 ## Labels
 
-`test`, `Stellar Wave`
+`test`
 
 ---
 
@@ -6887,7 +6887,7 @@ Same file as #303 and #304; sequence to avoid conflicting edits.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 ---
 
@@ -6989,7 +6989,7 @@ Should be reconciled with #292 if that lands first; same file as #302 and #304.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 ---
 
@@ -7088,7 +7088,7 @@ Same file as #302 and #303; sequence to avoid conflicting edits.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 ---
 
@@ -7186,7 +7186,7 @@ Same file as #306; can be done together.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 ---
 
@@ -7284,7 +7284,7 @@ Same file as #305; can be done together.
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 ---
 
@@ -7390,7 +7390,7 @@ Documentation change; verification by review against source and tracker:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 ---
 
@@ -7486,34 +7486,34 @@ Documentation change; verification by review:
 
 ## Labels
 
-`documentation`, `Stellar Wave`
+`documentation`
 
 ---
 
-# Issue #309 — Issue templates do not prompt for the complexity classification the wave programme requires
+# Issue #309 — Issue templates do not prompt for a complexity classification
 
 ## Problem Statement
 
 The repository has three issue templates —
 `.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`, and
-`security_vulnerability.md`. None of them mentions complexity, effort, or Drips
-points: grepping all three for `complexity`, `drips`, and `points` returns zero
+`security_vulnerability.md`. None of them prompts for complexity or effort:
+grepping all three for `complexity`, `effort`, and `points` returns zero
 matches.
 
-The repository carries a `Stellar Wave` label ("Issues in the Stellar wave
-program"), and every issue authored for that programme requires an explicit
-complexity classification — the backlog issues each carry a `## Complexity`
-section of Trivial, Medium, or High.
+Maintainers triaging incoming issues need an explicit complexity classification
+in order to size and prioritise them — the backlog issues each carry a
+`## Complexity` section of Trivial, Medium, or High, and externally filed issues
+arrive with no equivalent.
 
 ## Why It Matters
 
-Contributors filing issues through the templates produce entries that lack the one
-field the wave programme needs in order to assign points. A maintainer then has to
-triage and classify each one by hand, or the issue sits unclassifiable.
+Contributors filing issues through the templates produce entries with no size
+signal at all. A maintainer then has to assess and classify each one by hand
+before it can be prioritised, or the issue sits untriaged.
 
 The templates are the natural place to capture this at source. They already prompt
-for reproduction steps, expected behavior, and environment — adding the fields the
-programme actually consumes is a small change that removes recurring manual work.
+for reproduction steps, expected behavior, and environment — adding two more
+fields is a small change that removes recurring manual work.
 
 The backlog's own structure is the ready-made answer: `## Complexity`,
 `## Estimated Effort`, and `## Acceptance Criteria` are exactly the fields
@@ -7528,8 +7528,9 @@ Consider aligning the templates more broadly with the backlog's issue structure 
 externally filed issues and internally authored ones are shaped alike — but keep
 the change proportionate, since templates that demand too much deter contributors.
 
-Also consider whether the templates should default-apply the `Stellar Wave` label
-via the template front matter, which would save a triage step.
+Do not add automatic label defaults to the template front matter. Labels that
+enrol an issue in an external programme must stay a deliberate, per-issue
+decision by a maintainer rather than something the templates apply silently.
 
 ## Acceptance Criteria
 
@@ -7537,15 +7538,13 @@ via the template front matter, which would save a triage step.
 - [ ] Templates prompt for estimated effort
 - [ ] The prompts explain what the levels mean
 - [ ] Existing template fields are preserved
-- [ ] Label defaults are set deliberately in the template front matter
+- [ ] Templates add no automatic label defaults via front matter
 - [ ] Templates remain short enough not to deter contributors
 
 ## Technical Notes
 
-- GitHub issue template front matter supports a `labels:` key that applies labels automatically on creation.
 - The `security_vulnerability.md` template may warrant different handling — severity matters more than complexity there, and it should continue to direct reporters to the disclosure process in `SECURITY.md`.
 - The backlog's `## Complexity` / `## Estimated Effort` sections are the wording to reuse.
-- Closed issue #130 covered templates referencing labels that did not exist; verify any labels named in front matter exist before adding them.
 
 ## Relevant Files
 
@@ -7559,14 +7558,13 @@ via the template front matter, which would save a triage step.
 Configuration change; verification by use:
 
 - [ ] Each template renders correctly when filing a new issue
-- [ ] Any labels named in front matter exist in the repository
 - [ ] The complexity prompt is present and understandable
 - [ ] The security template still routes reporters to the disclosure process
 
 ## Definition of Done
 
 - [ ] Complexity and effort prompts added
-- [ ] Label defaults verified against existing labels
+- [ ] No automatic label defaults introduced
 - [ ] Templates render correctly
 
 ## Complexity
@@ -7583,7 +7581,7 @@ Configuration change; verification by use:
 
 ## Labels
 
-`enhancement`, `documentation`, `Stellar Wave`
+`enhancement`, `documentation`
 
 ---
 
@@ -7677,7 +7675,7 @@ Most useful alongside #249 (jest config) and #248 (CI job); independently landab
 
 ## Labels
 
-`test`, `enhancement`, `Stellar Wave`
+`test`, `enhancement`
 
 ---
 
@@ -7779,7 +7777,7 @@ Keep the existing panicking accessors unchanged so no caller breaks.
 
 ## Labels
 
-`enhancement`, `Stellar Wave`
+`enhancement`
 
 ---
 
@@ -7885,7 +7883,7 @@ Should adopt whatever indexing approach #234 settles on to avoid repeating the u
 
 ## Labels
 
-`feature`, `enhancement`, `Stellar Wave`
+`feature`, `enhancement`
 
 ---
 
@@ -8003,4 +8001,4 @@ Related to the closed issue #44's unenforced tier system; the two could share a 
 
 ## Labels
 
-`security`, `feature`, `Stellar Wave`
+`security`, `feature`
