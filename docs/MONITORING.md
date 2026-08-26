@@ -17,6 +17,7 @@ Comprehensive monitoring ensures system health and early issue detection.
 
 ### Financial Metrics
 - **Total Value Locked (TVL)**: Sum of all escrows
+- **Untracked Balance**: `get_untracked_balance()` per token. Represents `contract_balance - total_locked`. Indicates misclassified or accidentally transferred funds (issue #188). Should normally be zero or negligible.
 - **Volume**: Total processed this period
 - **Fee Revenue**: Platform fees collected
 - **Average Delivery Value**: Mean escrow amount
@@ -63,6 +64,7 @@ Example metrics:
 ### Critical Alerts (Immediate Response)
 - Contract error rate > 5%
 - TVL drops > 20% in 1 hour
+- **Untracked balance detected** (should be zero or negligible — indicates misclassified funds)
 - Admin key compromise detected
 - Contract balance insufficient
 
@@ -71,6 +73,7 @@ Example metrics:
 - Gas usage spike > 50%
 - Failed cross-contract calls
 - Unusual transaction patterns
+- **Untracked balance growth** (trending up — potential repeated fund misclassification)
 
 ### Medium Priority (Within 4 hours)
 - Warning: Storage approaching limits
@@ -127,6 +130,23 @@ stellar contract invoke \
 ```bash
 # Verify contract has sufficient balance
 stellar account balance $CONTRACT_ADDRESS --network mainnet
+
+# Check untracked balance (should be zero or negligible)
+stellar contract invoke \
+  --id $ESCROW_CONTRACT_ID \
+  --network mainnet \
+  -- get_untracked_balance \
+  --token $TOKEN_ADDRESS
+```
+
+### Escrow State Health
+```bash
+# Verify TVL matches expected locked amount
+stellar contract invoke \
+  --id $ESCROW_CONTRACT_ID \
+  --network mainnet \
+  -- get_total_locked \
+  --token $TOKEN_ADDRESS
 ```
 
 ### State Health
@@ -209,12 +229,14 @@ stellar contract invoke --id $CONTRACT_ID --fee-bump-account $ACCOUNT ...
 - Error breakdown
 - Gas usage trends
 - Response times
+- **Untracked balance** per token (should be zero or negligible)
 
 ### Financial Dashboard
 - Fee revenue
 - Average delivery value
 - Volume by asset
 - Top users by volume
+- **Untracked balance trend** (detect fund misclassification issues)
 
 ## Example Alert Configuration
 
@@ -230,6 +252,12 @@ alerts:
     condition: tvl_change_1h < -0.2
     severity: critical
     notify: finance-team
+
+  - name: Untracked Balance Detected
+    condition: untracked_balance > 0
+    severity: critical
+    notify: finance-team
+    runbook: "https://docs/runbooks/untracked-balance.md"
   
   - name: Gas Spike
     condition: avg_gas_30m > baseline * 1.5

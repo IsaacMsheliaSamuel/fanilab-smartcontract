@@ -754,7 +754,9 @@ impl DeliveryContract {
             // InTransit: escrow should still be Locked
             (DeliveryStatus::InTransit, shared_types::EscrowStatus::Locked) => true,
 
-            // Delivered: escrow must be Released (funds moved to driver)
+            // Delivered: escrow can be in Holdback (post-confirmation, pre-release)
+            // or Released (after driver payout completes)
+            (DeliveryStatus::Delivered, shared_types::EscrowStatus::Holdback) => true,
             (DeliveryStatus::Delivered, shared_types::EscrowStatus::Released) => true,
 
             // Disputed: escrow must be Paused

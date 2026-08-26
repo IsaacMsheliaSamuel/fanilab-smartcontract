@@ -85,6 +85,12 @@ fn get_fleet_management_contract(env: &Env) -> Option<Address> {
         .get(&DataKey::FleetManagementContract)
 }
 
+fn get_identity_reputation_contract(env: &Env) -> Option<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::IdentityReputationContract)
+}
+
 fn payout_driver(
     env: &Env,
     token: &Address,
@@ -218,6 +224,7 @@ enum DataKey {
     Paused,
     FleetManagementContract,
     DisputeResolutionContract,
+    IdentityReputationContract,
     /// Track total locked value per token
     TotalLocked(Address),
     /// Track sender volume (number of completed deliveries)
@@ -524,6 +531,20 @@ impl EscrowContract {
             .get(&DataKey::DisputeResolutionContract)
     }
 
+    pub fn set_identity_reputation_contract(env: Env, admin: Address, identity_contract: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityReputationContract, &identity_contract);
+    }
+
+    pub fn get_identity_reputation_contract_public(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::IdentityReputationContract)
+    }
+
     pub fn propose_admin(env: Env, current_admin: Address, new_admin: Address) {
         current_admin.require_auth();
         let stored_admin: Address = env
@@ -787,8 +808,13 @@ impl EscrowContract {
                 }
 
                 env.events().publish(
-                    (events::escrow_funded(&env), delivery_id),
-                    (sender.clone(), recipient.clone(), amount),
+                    (events::escrow_funded(&env),),
+                    shared_types::EscrowFundedEvent {
+                        delivery_id,
+                        sender: sender.clone(),
+                        token: token.clone(),
+                        amount,
+                    },
                 );
                 count += 1;
             }
@@ -955,6 +981,41 @@ impl EscrowContract {
             token::Client::new(&env, &record.token).balance(&env.current_contract_address());
         if contract_balance < record.amount {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
+        }
+
+        // If refunding from Holdback (delivery was confirmed and driver credited reputation),
+        // reverse the reputation gain before transferring funds. Use the same penalty mechanism
+        // as resolve_dispute_refund_sender for consistency with the accounting invariant:
+        // "reputation credited for a delivery implies the driver was paid for it".
+        let is_holdback_refund = record.status == EscrowStatus::Holdback;
+        if is_holdback_refund {
+            if let Some(reputation_addr) = get_identity_reputation_contract(&env) {
+                // Query dispute_resolution_contract for the penalty, or use a default if unavailable.
+                // This ensures consistency across all refund paths.
+                let penalty: u32 = if let Some(dispute_addr) = 
+                    env.storage().instance().get::<DataKey, Address>(&DataKey::DisputeResolutionContract)
+                {
+                    env.invoke_contract(
+                        &dispute_addr,
+                        &Symbol::new(&env, "get_dispute_reputation_penalty"),
+                        soroban_sdk::vec![&env],
+                    )
+                } else {
+                    10u32 // DEFAULT_DISPUTE_REPUTATION_PENALTY
+                };
+
+                use soroban_sdk::IntoVal;
+                let _: () = env.invoke_contract(
+                    &reputation_addr,
+                    &Symbol::new(&env, "decrease_reputation"),
+                    soroban_sdk::vec![
+                        &env,
+                        env.current_contract_address().into_val(&env),
+                        record.driver.clone().into_val(&env),
+                        penalty.into_val(&env),
+                    ],
+                );
+            }
         }
 
         // Effects (state) are committed before the interaction (transfer)
@@ -1332,8 +1393,25 @@ impl EscrowContract {
         env.storage().persistent().get(&key).unwrap_or(0)
     }
 
+    /// Returns the amount of untracked balance for a given token without executing
+    /// a sweep. This is a read-only view function used for visibility and monitoring.
+    /// 
+    /// Untracked balance = contract_balance - total_locked. If the contract balance
+    /// is less than or equal to total_locked, returns 0 (indicating nothing to sweep).
+    ///
+    /// This allows operators to:
+    /// 1. Verify the sweep amount before executing sweep_untracked_balance
+    /// 2. Monitor untracked balance as a key metric
+    /// 3. Detect misclassified funds (issue #188)
+    pub fn get_untracked_balance(env: Env, token: Address) -> i128 {
+        let contract_balance =
+            token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let total_locked = Self::get_total_locked(env, token);
+        contract_balance.saturating_sub(total_locked)
+    }
+
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
-    pub fn sweep_untracked_balance(env: Env, admin: Address, token: Address, recipient: Address) {
+    pub fn sweep_untracked_balance(env: Env, admin: Address, token: Address, recipient: Address) -> i128 {
         admin.require_auth();
         require_admin(&env, &admin);
 
@@ -1342,7 +1420,7 @@ impl EscrowContract {
         let total_locked = Self::get_total_locked(env.clone(), token.clone());
 
         if contract_balance <= total_locked {
-            return;
+            return 0;
         }
 
         let untracked_balance = contract_balance.saturating_sub(total_locked);
@@ -1354,8 +1432,10 @@ impl EscrowContract {
 
         env.events().publish(
             (Symbol::new(&env, "untracked_balance_swept"),),
-            (token, untracked_balance, recipient),
+            (token.clone(), untracked_balance, recipient),
         );
+
+        untracked_balance
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
