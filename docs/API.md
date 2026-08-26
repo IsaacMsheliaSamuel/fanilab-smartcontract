@@ -393,12 +393,13 @@ Retrieve full escrow record.
 - `DeliveryNotFound` - No escrow for this delivery
 
 #### `create_escrows_batch`
-Create multiple escrows in a single transaction (up to 100 per batch).
+Create multiple escrows in a single transaction (up to 100 per batch). Enforces
+the same token and amount validation as `create_escrow`.
 
 **Parameters:**
 - `sender: Address` - Sender funding all escrows
 - `recipient: Address` - Delivery recipient (shared for all)
-- `token: Address` - Token for all escrows
+- `token: Address` - Token for all escrows; must match the protocol-configured token
 - `escrow_list: Vec<(u64, Address, i128)>` — tuples of (delivery_id, driver, amount)
 
 **Authorization:** Sender
@@ -406,6 +407,8 @@ Create multiple escrows in a single transaction (up to 100 per batch).
 **Returns:** `u32` — count of escrows created
 
 **Errors:**
+- `InvalidToken` - Token does not match the protocol-configured token
+- `InvalidAmount` - Any element's amount is not positive
 - `DuplicateDelivery` - Escrow already exists for any delivery_id
 - `InvalidState` - Batch size exceeds 100
 

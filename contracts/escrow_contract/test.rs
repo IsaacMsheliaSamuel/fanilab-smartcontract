@@ -1924,6 +1924,334 @@ fn test_create_escrows_batch_rejected_while_paused() {
     }
 }
 
+// ── Issue #188: create_escrows_batch must maintain TotalLocked ──────────────
+
+#[test]
+fn test_batch_increases_total_locked() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 6000);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((1u64, driver.clone(), 1000i128));
+    escrow_list.push_back((2u64, driver.clone(), 2000i128));
+    escrow_list.push_back((3u64, driver.clone(), 3000i128));
+
+    assert_eq!(client.get_total_locked(&token), 0);
+    assert_eq!(
+        client.create_escrows_batch(&sender, &recipient, &token, &escrow_list),
+        3
+    );
+    assert_eq!(client.get_total_locked(&token), 6000);
+}
+
+#[test]
+fn test_batch_release_each_returns_total_locked_to_zero() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 3000);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((4u64, driver.clone(), 1000i128));
+    escrow_list.push_back((5u64, driver.clone(), 2000i128));
+
+    client.create_escrows_batch(&sender, &recipient, &token, &escrow_list);
+    assert_eq!(client.get_total_locked(&token), 3000);
+
+    client.release_escrow(&recipient, &4u64);
+    assert_eq!(client.get_total_locked(&token), 2000);
+
+    client.release_escrow(&recipient, &5u64);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_sweep_untracked_balance_after_batch_moves_no_funds() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let recovery_address = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 2000);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((6u64, driver.clone(), 1000i128));
+    escrow_list.push_back((7u64, driver.clone(), 1000i128));
+
+    client.create_escrows_batch(&sender, &recipient, &token, &escrow_list);
+    assert_eq!(client.get_total_locked(&token), 2000);
+    assert_eq!(balance(&env, &token, &contract_id), 2000);
+
+    // Batch-created escrows are fully tracked, so nothing is untracked.
+    client.sweep_untracked_balance(&admin, &token, &recovery_address);
+
+    assert_eq!(balance(&env, &token, &contract_id), 2000);
+    assert_eq!(balance(&env, &token, &recovery_address), 0);
+    assert_eq!(client.get_total_locked(&token), 2000);
+
+    // Every batch-created escrow remains settleable after the sweep.
+    client.release_escrow(&recipient, &6u64);
+    client.release_escrow(&recipient, &7u64);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_batch_total_locked_single_and_max_batch_size() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // A MAX_BATCH_SIZE batch performs 100 cross-contract token transfers plus
+    // per-record storage writes, which exceeds both the default test-host CPU
+    // budget and the mainnet invocation resource limits (footprint/writes/
+    // events). Disable both for this edge-case test only.
+    env.cost_estimate().disable_resource_limits();
+    env.cost_estimate()
+        .budget()
+        .reset_limits(1_000_000_000, 1_000_000_000);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 10_000);
+
+    // Edge case: batch of size 1.
+    let mut single = soroban_sdk::Vec::new(&env);
+    single.push_back((8u64, driver.clone(), 500i128));
+    client.create_escrows_batch(&sender, &recipient, &token, &single);
+    assert_eq!(client.get_total_locked(&token), 500);
+
+    // Edge case: batch at MAX_BATCH_SIZE.
+    let mut max_batch = soroban_sdk::Vec::new(&env);
+    for i in 0..constants::MAX_BATCH_SIZE {
+        max_batch.push_back((100u64 + u64::from(i), driver.clone(), 10i128));
+    }
+    client.create_escrows_batch(&sender, &recipient, &token, &max_batch);
+    assert_eq!(client.get_total_locked(&token), 500 + 100 * 10);
+}
+
+#[test]
+fn test_batch_total_locked_accumulates_across_senders() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender1 = Address::generate(&env);
+    let sender2 = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender1, 2000);
+    mint(&env, &token, &sender2, 500);
+
+    let mut batch1 = soroban_sdk::Vec::new(&env);
+    batch1.push_back((200u64, driver.clone(), 1000i128));
+    batch1.push_back((201u64, driver.clone(), 1000i128));
+    client.create_escrows_batch(&sender1, &recipient, &token, &batch1);
+    assert_eq!(client.get_total_locked(&token), 2000);
+
+    let mut batch2 = soroban_sdk::Vec::new(&env);
+    batch2.push_back((202u64, driver.clone(), 500i128));
+    client.create_escrows_batch(&sender2, &recipient, &token, &batch2);
+    assert_eq!(client.get_total_locked(&token), 2500);
+}
+
+// ── Issue #189: create_escrows_batch must enforce create_escrow's guards ─────
+
+#[test]
+fn test_batch_with_foreign_token_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let other_token_admin = Address::generate(&env);
+    let other_token = setup_token(&env, &other_token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 500);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((300u64, driver.clone(), 500i128));
+
+    let result = client.try_create_escrows_batch(&sender, &recipient, &other_token, &escrow_list);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidToken.into()),
+        _ => panic!("Expected EscrowError::InvalidToken"),
+    }
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_batch_with_zero_amount_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((301u64, driver.clone(), 0i128));
+
+    let result = client.try_create_escrows_batch(&sender, &recipient, &token, &escrow_list);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidAmount.into()),
+        _ => panic!("Expected EscrowError::InvalidAmount"),
+    }
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_batch_with_negative_amount_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((302u64, driver.clone(), -500i128));
+
+    let result = client.try_create_escrows_batch(&sender, &recipient, &token, &escrow_list);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidAmount.into()),
+        _ => panic!("Expected EscrowError::InvalidAmount"),
+    }
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+#[test]
+fn test_batch_invalid_element_leaves_no_partial_state() {
+    // Invalid element at position 2 of 3: the whole batch must revert with no
+    // partial state — no escrows, no index entries, no funds moved, and no
+    // TotalLocked change (Soroban rolls back all storage on panic).
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 3000);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((400u64, driver.clone(), 1000i128));
+    escrow_list.push_back((401u64, driver.clone(), 0i128)); // invalid element at position 2
+    escrow_list.push_back((402u64, driver.clone(), 1000i128));
+
+    let result = client.try_create_escrows_batch(&sender, &recipient, &token, &escrow_list);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidAmount.into()),
+        _ => panic!("Expected EscrowError::InvalidAmount"),
+    }
+
+    for delivery_id in [400u64, 401u64, 402u64] {
+        let result = client.try_get_escrow(&delivery_id);
+        match result {
+            Err(Ok(err)) => assert_eq!(err, EscrowError::DeliveryNotFound.into()),
+            _ => panic!("Expected DeliveryNotFound for delivery {delivery_id}"),
+        }
+    }
+    assert_eq!(client.get_total_locked(&token), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+    assert_eq!(client.get_escrows_by_sender(&sender).len(), 0);
+    assert_eq!(client.get_escrows_by_recipient(&recipient).len(), 0);
+    assert_eq!(client.get_escrows_by_driver(&driver).len(), 0);
+}
+
+#[test]
+fn test_batch_valid_creates_every_escrow() {
+    // Non-regression: an all-valid batch still creates every escrow, updates
+    // the secondary indexes, and maintains TotalLocked.
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 3000);
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((500u64, driver.clone(), 1000i128));
+    escrow_list.push_back((501u64, driver.clone(), 1000i128));
+    escrow_list.push_back((502u64, driver.clone(), 1000i128));
+
+    assert_eq!(
+        client.create_escrows_batch(&sender, &recipient, &token, &escrow_list),
+        3
+    );
+
+    for delivery_id in [500u64, 501u64, 502u64] {
+        let record = client.get_escrow(&delivery_id);
+        assert_eq!(record.status, EscrowStatus::Locked);
+        assert_eq!(record.amount, 1000);
+    }
+    assert_eq!(client.get_total_locked(&token), 3000);
+    assert_eq!(client.get_escrows_by_sender(&sender).len(), 3);
+    assert_eq!(client.get_escrows_by_recipient(&recipient).len(), 3);
+    assert_eq!(client.get_escrows_by_driver(&driver).len(), 3);
+    assert_eq!(balance(&env, &token, &contract_id), 3000);
+}
+
 #[test]
 fn test_mark_holdback_escrow_rejected_while_paused() {
     let (env, contract_id, _admin, _sender, recipient, _driver) = setup_paused_with_escrow(902);
