@@ -1098,7 +1098,22 @@ impl EscrowContract {
     ) {
         caller.require_auth();
         require_not_paused(&env);
-        require_admin(&env, &caller);
+        // Allow calls from either the admin or the dispute resolution contract.
+        // This enables both admin-initiated resolutions and automatic force-resolve
+        // timeouts (where the dispute_resolution_contract calls on its own behalf).
+        let is_caller_admin = is_admin(&env, &caller);
+        let is_caller_dispute_contract = if let Some(dispute_contract) =
+            env.storage()
+                .instance()
+                .get::<_, Address>(&DataKey::DisputeResolutionContract)
+        {
+            caller == dispute_contract
+        } else {
+            false
+        };
+        if !is_caller_admin && !is_caller_dispute_contract {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
         if sender_share_bps > 10000 {
             panic_with_error!(&env, EscrowError::InvalidFee);
         }

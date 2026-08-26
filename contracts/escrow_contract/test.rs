@@ -2506,3 +2506,70 @@ fn test_raise_dispute_rejected_on_holdback_escrow() {
 
     assert_eq!(client.get_escrow(&926u64).status, EscrowStatus::Holdback);
 }
+
+
+/// Test that resolve_dispute_split succeeds when called from the dispute
+/// resolution contract (after it has been set via set_dispute_resolution_contract).
+/// This validates the fix for the authorization issue where force_resolve_dispute
+/// couldn't call resolve_dispute_split.
+#[test]
+fn test_resolve_dispute_split_accepts_dispute_resolution_contract_caller() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let dispute_contract = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    client.set_dispute_resolution_contract(&admin, &dispute_contract);
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &500u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &500u64);
+
+    // Verify escrow is Paused after dispute
+    let record = client.get_escrow(&500u64);
+    assert_eq!(record.status, EscrowStatus::Paused);
+
+    // Call resolve_dispute_split as the dispute resolution contract
+    // (simulating what force_resolve_dispute does)
+    client.resolve_dispute_split(&dispute_contract, &500u64, &5000);
+
+    // Verify the split was successful: 50% to sender, 50% to driver
+    let record = client.get_escrow(&500u64);
+    assert_eq!(record.status, EscrowStatus::Split);
+    assert_eq!(balance(&env, &token, &sender), 500); // 50% of 1000
+    assert_eq!(balance(&env, &token, &driver), 500); // 50% of 1000
+}
+
+/// Test that resolve_dispute_split still requires admin authorization
+/// when dispute resolution contract is not set.
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
+fn test_resolve_dispute_split_requires_admin_when_no_dispute_contract() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    // Deliberately NOT setting the dispute resolution contract
+    mint(&env, &token, &sender, 1000);
+
+    client.create_escrow(&sender, &recipient, &driver, &501u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &501u64);
+
+    // Try to call resolve_dispute_split as a non-admin
+    let attacker = Address::generate(&env);
+    client.resolve_dispute_split(&attacker, &501u64, &5000);
+}

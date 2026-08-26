@@ -259,9 +259,22 @@ impl DeliveryContract {
         delivery_id
     }
 
-    /// Create multiple deliveries in a single transaction.  Sender must authorize.
-    /// Returns Vec of created delivery IDs.  Each delivery funds escrow individually
-    /// via cross-contract calls to the escrow contract.
+    /// Create multiple deliveries in a single transaction. Sender must authorize.
+    /// Returns Vec of created delivery IDs. Each delivery is stored with Pending status
+    /// and secondary indexes are updated, but NO escrow is created.
+    ///
+    /// **IMPORTANT:** This function DOES NOT create escrows. Escrow creation is a separate,
+    /// required step: after obtaining delivery IDs from this function, call
+    /// `escrow_contract::create_escrows_batch` with the returned delivery_ids to fund
+    /// the escrows. The two operations must be paired: deliveries without escrows will
+    /// fail at driver assignment or delivery confirmation with DeliveryNotFound errors.
+    ///
+    /// **Integration Sequence:**
+    /// 1. Call `delivery_contract::create_deliveries_batch` with metadata → returns Vec<DeliveryId>
+    /// 2. Call `escrow_contract::create_escrows_batch` with (delivery_id, driver, amount) tuples
+    ///
+    /// The ordering constraint exists because delivery_ids must be known before escrows
+    /// can reference them, and `create_escrows_batch` accepts explicit delivery_ids.
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn create_deliveries_batch(
         env: Env,
@@ -349,8 +362,12 @@ impl DeliveryContract {
                 recipient_deliveries.push_back(delivery_id);
 
                 env.events().publish(
-                    (soroban_sdk::Symbol::new(&env, "delivery_created"),),
-                    (delivery_id, sender.clone()),
+                    (events::delivery_created(&env),),
+                    DeliveryCreatedEvent {
+                        delivery_id: delivery_id.value(),
+                        sender: sender.clone(),
+                        amount: 0,
+                    },
                 );
 
                 result.push_back(delivery_id);
