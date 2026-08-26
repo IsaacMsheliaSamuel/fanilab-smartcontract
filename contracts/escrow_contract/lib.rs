@@ -996,7 +996,15 @@ impl EscrowContract {
         if caller != record.sender && caller != record.recipient && caller != record.driver {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
-        if record.status != EscrowStatus::Locked {
+        // Accept both Locked (pre-delivery dispute) and Holdback (post-delivery
+        // dispute, after recipient has confirmed but before escrow is released).
+        // This unblocks the Delivered → Disputed transition described in issue
+        // #193: after confirm_delivery the escrow is in Holdback, not Locked,
+        // so rejecting Holdback here made post-delivery disputes unreachable.
+        // freeze_funds already treats Locked and Holdback identically, which
+        // establishes the precedent that the transition is sound.  Terminal
+        // states (Released, Refunded, Split) are still rejected.
+        if record.status != EscrowStatus::Locked && record.status != EscrowStatus::Holdback {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
         let timestamp = env.ledger().timestamp();
@@ -1024,6 +1032,20 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
 
+        // Balance verification guard: confirm contract holds sufficient funds
+        // before any state mutation or transfer.  Runs for both branches so
+        // that a shortfall produces the typed InsufficientFunds error in all
+        // cases rather than an opaque token-level failure deep inside
+        // settle_escrow_funds (release branch) or the token transfer (refund
+        // branch).  Matches the pattern used by release_escrow,
+        // refund_escrow, release_holdback_escrow, resolve_dispute_split, and
+        // reclaim_expired_escrow.  See issue #194.
+        let contract_balance =
+            token::Client::new(&env, &record.token).balance(&env.current_contract_address());
+        if contract_balance < record.amount {
+            panic_with_error!(&env, EscrowError::InsufficientFunds);
+        }
+
         // Checks + effects (state) are resolved per-branch first; the actual
         // fund transfer (interaction) happens only after all state below is
         // committed, per checks-effects-interactions.
@@ -1048,11 +1070,6 @@ impl EscrowContract {
             record.status = EscrowStatus::Released;
             get_fleet_management_contract(&env)
         } else {
-            let contract_balance =
-                token::Client::new(&env, &record.token).balance(&env.current_contract_address());
-            if contract_balance < record.amount {
-                panic_with_error!(&env, EscrowError::InsufficientFunds);
-            }
             record.status = EscrowStatus::Refunded;
             None
         };
