@@ -33,7 +33,7 @@ impl MockEscrowContract {
         }
         _env.storage()
             .temporary()
-            .set(&Symbol::new(&_env, "released"), &delivery_id);
+            .set(&Symbol::new(&_env, "holdback"), &delivery_id);
     }
 
     pub fn release_escrow(_env: Env, _caller: Address, delivery_id: u64) {
@@ -45,6 +45,10 @@ impl MockEscrowContract {
             .set(&Symbol::new(&_env, "released"), &delivery_id);
     }
 
+    pub fn is_paused(_env: Env) -> bool {
+        false
+    }
+
     pub fn raise_dispute(_env: Env, _caller: Address, delivery_id: u64) {
         if delivery_id == 9999 {
             panic!("MockEscrowFailure");
@@ -54,18 +58,49 @@ impl MockEscrowContract {
             .set(&Symbol::new(&_env, "disputed"), &delivery_id);
     }
 
-    /// Minimal stand-in for get_combined_state's cross-call — always reports
-    /// a Locked escrow, which is the synchronized counterpart for every
-    /// pre-Delivered/Disputed/Cancelled delivery status.
-    pub fn get_escrow(_env: Env, _delivery_id: u64) -> shared_types::EscrowRecord {
+    /// Minimal stand-in for get_combined_state's cross-call. Reflect the
+    /// escrow operation recorded by the mock, while defaulting to Locked for
+    /// pre-Delivered/Disputed/Cancelled delivery states.
+    pub fn get_escrow(_env: Env, delivery_id: u64) -> shared_types::EscrowRecord {
         let placeholder = Address::generate(&_env);
+        let status = if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "holdback"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Holdback
+        } else if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "released"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Released
+        } else if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "refunded"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Refunded
+        } else if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "disputed"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Paused
+        } else {
+            shared_types::EscrowStatus::Locked
+        };
         shared_types::EscrowRecord {
             sender: placeholder.clone(),
             recipient: placeholder.clone(),
             driver: placeholder,
             token: Address::generate(&_env),
             amount: 0,
-            status: shared_types::EscrowStatus::Locked,
+            status,
             created_at: _env.ledger().timestamp(),
             expires_at: None,
             disputed_by: None,
