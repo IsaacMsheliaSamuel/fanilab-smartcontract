@@ -2506,3 +2506,177 @@ fn test_raise_dispute_rejected_on_holdback_escrow() {
 
     assert_eq!(client.get_escrow(&926u64).status, EscrowStatus::Holdback);
 }
+
+// ── Issue #192: permissionless holdback expiry ──────────────────────────────
+
+/// A recipient who never calls `release_holdback_escrow` (and no dispute is
+/// raised) used to strand the driver's funds in `Holdback` forever. Once the
+/// admin-configurable holdback window has elapsed since `mark_holdback_escrow`
+/// recorded `holdback_started_at`, anyone may call `release_expired_holdback`
+/// to settle the escrow to the driver, minus the platform fee — no caller
+/// authorization required.
+#[test]
+fn test_release_expired_holdback_pays_driver_after_window() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &500);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(&sender, &recipient, &driver, &930u64, &token, &1000, &None);
+    client.mark_holdback_escrow(&recipient, &930u64);
+
+    let holdback_started_at = client.get_escrow(&930u64).holdback_started_at.unwrap();
+    assert_eq!(holdback_started_at, env.ledger().timestamp());
+
+    let window = client.get_holdback_window();
+    env.ledger().set_timestamp(holdback_started_at + window + 1);
+
+    // Permissionless: no auth/caller argument at all.
+    client.release_expired_holdback(&930u64);
+
+    assert_eq!(client.get_escrow(&930u64).status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 950);
+    assert_eq!(balance(&env, &token, &admin), 50);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+    assert_eq!(client.get_total_locked(&token), 0);
+}
+
+/// Before the holdback window has elapsed, `release_expired_holdback` must
+/// be rejected with a typed error rather than silently succeeding early.
+#[test]
+fn test_release_expired_holdback_rejected_before_window_elapses() {
+    let (env, contract_id, token, _admin, _sender, _recipient, _driver) =
+        setup_holdback_escrow(931, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // Called immediately after mark_holdback_escrow, well within the
+    // default window.
+    let result = client.try_release_expired_holdback(&931u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::TimelockNotElapsed.into()),
+        _ => panic!("Expected EscrowError::TimelockNotElapsed"),
+    }
+
+    assert_eq!(client.get_escrow(&931u64).status, EscrowStatus::Holdback);
+    assert_eq!(client.get_total_locked(&token), 500);
+}
+
+/// A `Paused` (frozen) escrow must not be reachable through the holdback
+/// expiry path, no matter how much time has passed: `release_expired_holdback`
+/// only ever accepts `Holdback`, so a dispute frozen out of `Holdback` still
+/// falls back to admin arbitration exactly as before.
+#[test]
+fn test_release_expired_holdback_rejects_paused_escrow() {
+    let (env, contract_id, token, admin, sender, _recipient, _driver) =
+        setup_holdback_escrow(932, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let dispute_contract = Address::generate(&env);
+    client.set_dispute_resolution_contract(&admin, &dispute_contract);
+
+    client.freeze_funds(&dispute_contract, &932u64);
+    assert_eq!(client.get_escrow(&932u64).status, EscrowStatus::Paused);
+
+    // Advance well past the holdback window — a Paused escrow must not care.
+    let window = client.get_holdback_window();
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + window + 1);
+
+    let result = client.try_release_expired_holdback(&932u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
+        _ => panic!("Expected EscrowError::InvalidState"),
+    }
+
+    assert_eq!(client.get_escrow(&932u64).status, EscrowStatus::Paused);
+    assert_eq!(client.get_total_locked(&token), 500);
+
+    // Still recoverable through admin arbitration, unaffected by the new path.
+    client.resolve_dispute(&admin, &932u64, &false);
+    assert_eq!(client.get_escrow(&932u64).status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 500);
+}
+
+/// Regression: `reclaim_expired_escrow` must remain Locked-only and keep
+/// refunding the sender — the new `holdback_started_at` field on
+/// `EscrowRecord` must not change its behavior, and it must still reject a
+/// `Holdback` escrow outright even once that escrow's holdback window (a
+/// wholly separate mechanism) has elapsed.
+#[test]
+fn test_reclaim_expired_escrow_regression_locked_only() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+
+    // Locked escrow: unaffected by the new field, still refunds the sender.
+    client.create_escrow(&sender, &recipient, &driver, &933u64, &token, &1000, &None);
+    assert_eq!(client.get_escrow(&933u64).holdback_started_at, None);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 31 * 24 * 60 * 60);
+    client.reclaim_expired_escrow(&933u64);
+
+    assert_eq!(client.get_escrow(&933u64).status, EscrowStatus::Refunded);
+    assert_eq!(balance(&env, &token, &sender), 1000);
+    assert_eq!(balance(&env, &token, &driver), 0);
+
+    // A Holdback escrow, even past its own expiry window, is still rejected
+    // by reclaim_expired_escrow — that permissionless exit belongs solely to
+    // release_expired_holdback.
+    mint(&env, &token, &sender, 500);
+    client.create_escrow(&sender, &recipient, &driver, &934u64, &token, &500, &None);
+    client.mark_holdback_escrow(&recipient, &934u64);
+
+    let result = client.try_reclaim_expired_escrow(&934u64);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidState.into()),
+        _ => panic!("Expected EscrowError::InvalidState"),
+    }
+    assert_eq!(client.get_escrow(&934u64).status, EscrowStatus::Holdback);
+}
+
+/// Edge case: the window is defined as elapsed once
+/// `current_timestamp >= holdback_started_at + window`, so the release must
+/// still be rejected one second before the boundary and must succeed exactly
+/// at it.
+#[test]
+fn test_release_expired_holdback_boundary_timestamp() {
+    let (env, contract_id, token, _admin, _sender, _recipient, driver) =
+        setup_holdback_escrow(935, 500);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let holdback_started_at = client.get_escrow(&935u64).holdback_started_at.unwrap();
+    let window = client.get_holdback_window();
+    let deadline = holdback_started_at + window;
+
+    // One second before the boundary: still rejected.
+    env.ledger().set_timestamp(deadline - 1);
+    let early = client.try_release_expired_holdback(&935u64);
+    match early {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::TimelockNotElapsed.into()),
+        _ => panic!("Expected EscrowError::TimelockNotElapsed"),
+    }
+    assert_eq!(client.get_escrow(&935u64).status, EscrowStatus::Holdback);
+
+    // Exactly at the boundary: the window has elapsed, release succeeds.
+    env.ledger().set_timestamp(deadline);
+    client.release_expired_holdback(&935u64);
+
+    assert_eq!(client.get_escrow(&935u64).status, EscrowStatus::Released);
+    assert_eq!(balance(&env, &token, &driver), 500);
+}

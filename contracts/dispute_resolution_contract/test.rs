@@ -197,6 +197,7 @@ fn create_mock_escrow_record(
         expires_at: None,
         disputed_by: None,
         disputed_at: None,
+        holdback_started_at: None,
         fleet_id: None,
     }
 }

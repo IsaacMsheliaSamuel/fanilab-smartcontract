@@ -17,7 +17,9 @@ Locked ──► Released
   │
   ├──► Refunded
   │
-  ├──► Holdback ──► Released
+  ├──► Holdback ──► Released   (release_holdback_escrow: recipient/admin)
+  │        │
+  │        ├──► Released       (release_expired_holdback: permissionless, after window)
   │        │
   │        └──► Paused
   │
@@ -39,6 +41,26 @@ Locked ──► Released
 recipient may call and which `delivery_contract::confirm_delivery` invokes on
 confirmation. Reaching it means the driver has performed and has been credited
 reputation for the delivery, so the funds are earmarked for them.
+
+#### Holdback expiry (Issue #192)
+
+`mark_holdback_escrow` records `holdback_started_at` on the `EscrowRecord`.
+If the recipient never calls `release_holdback_escrow` and no dispute freezes
+the escrow into `Paused`, the driver's funds would otherwise sit in
+`Holdback` indefinitely with no permissionless exit. Once
+`get_holdback_window()` seconds have elapsed since `holdback_started_at`,
+**anyone** may call `release_expired_holdback(delivery_id)` to settle the
+escrow to the driver (minus the platform fee), reusing the same settlement
+logic as `release_holdback_escrow`. Calling it before the window elapses
+reverts with `EscrowError::TimelockNotElapsed`; calling it on anything other
+than a `Holdback` escrow (including a `Paused`/frozen one) reverts with
+`EscrowError::InvalidState` — a frozen escrow is unaffected by the holdback
+window and remains on the admin-arbitration path.
+
+The window defaults to `DEFAULT_HOLDBACK_WINDOW_SECONDS` (3 days) and is
+admin-configurable via `set_holdback_window`, subject to a documented
+minimum, `MIN_HOLDBACK_WINDOW_SECONDS` (1 day) — mirroring the
+`dispute_time_limit` precedent in `dispute_resolution_contract`.
 
 ### Refund Authorization Invariant
 
@@ -75,6 +97,7 @@ pub struct EscrowRecord {
     pub status: EscrowStatus,
     pub expires_at: Option<u64>,
     pub disputed_at: Option<u64>,
+    pub holdback_started_at: Option<u64>, // set by mark_holdback_escrow; drives release_expired_holdback
 }
 ```
 
@@ -126,7 +149,13 @@ Transfers the full amount back to the sender and sets status to `Refunded`.
 Emits an `escrow_refunded` event.
 
 ### `reclaim_expired_escrow(env, delivery_id)`
-Allows anyone to reclaim an escrow that has passed its `expires_at` timestamp. Funds are returned to the sender. This prevents funds from being locked indefinitely.
+Allows anyone to reclaim an escrow that has passed its `expires_at` timestamp. Funds are returned to the sender. Valid only from `Locked`; unaffected by `Holdback`/holdback expiry. This prevents funds from being locked indefinitely.
+
+### `release_expired_holdback(env, delivery_id)`
+Permissionless counterpart to `release_holdback_escrow` (Issue #192). Valid only from `Holdback`, and only once `get_holdback_window()` seconds have elapsed since `holdback_started_at`. Settles the escrow to the driver, minus the platform fee, using the same settlement logic as `release_holdback_escrow`. Reverts with `EscrowError::TimelockNotElapsed` if called early, or `EscrowError::InvalidState` if the escrow isn't in `Holdback` (e.g. it was frozen to `Paused`). Prevents a passive recipient from stranding driver funds indefinitely.
+
+### `set_holdback_window(env, admin, new_window_seconds)` / `get_holdback_window(env)`
+Admin-configurable holdback window used by `release_expired_holdback`. Defaults to `DEFAULT_HOLDBACK_WINDOW_SECONDS` (3 days) and cannot be set below `MIN_HOLDBACK_WINDOW_SECONDS` (1 day).
 
 ### `freeze_funds(env, caller, delivery_id)`
 Called exclusively by the **dispute resolution contract** to pause an escrow when a dispute is raised. Transitions status from `Locked` to `Paused`. Emits a `funds_frozen` event.
@@ -184,6 +213,8 @@ The dispute resolution contract is authorized to call `freeze_funds` and `unfree
 | `escrow_refunded`      | `refund_escrow`          | `(sender, amount)`                   |
 | `funds_frozen`         | `freeze_funds`           | `(caller, timestamp)`                |
 | `platform_fee_updated` | `update_platform_fee`    | `(new_fee_bps)`                      |
+| `holdback_expired_released` | `release_expired_holdback` | `(driver, amount, platform_fee)` |
+| `holdback_window_updated`   | `set_holdback_window`      | `(admin, new_window_seconds)`    |
 
 ---
 
@@ -191,7 +222,7 @@ The dispute resolution contract is authorized to call `freeze_funds` and `unfree
 
 1. **Access Control**: Only authorized contracts (delivery, dispute) can release or refund escrows. Admin functions require explicit admin authentication.
 2. **Re-entrancy Protection**: All state mutations happen before external token transfers.
-3. **Expiry**: Expired escrows can be reclaimed by anyone, preventing permanent fund lockup.
+3. **Expiry**: Expired `Locked` escrows can be reclaimed by anyone via `reclaim_expired_escrow`, and expired `Holdback` escrows can be released to the driver by anyone via `release_expired_holdback`, preventing permanent fund lockup in either state.
 4. **Pause Mechanism**: The protocol can be paused via the admin, halting all fund movements for emergency maintenance.
 
 ---
