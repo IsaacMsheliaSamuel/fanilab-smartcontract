@@ -160,6 +160,23 @@ platform_fee = amount * platform_fee_bps / 10_000
 - The remainder is paid to the driver (or fleet treasury)
 - Fees are set during initialization and can be updated by the admin
 
+### Volume Tiers
+
+`set_volume_tiers(env, admin, tiers)` lets the admin configure volume-based
+fee discounts. `get_effective_fee_bps` selects a tier by walking the stored
+list in reverse and returning on the first entry whose `volume_threshold` the
+sender's volume meets, so the list must be sorted ascending by
+`volume_threshold` for tier selection to be correct. To guarantee this,
+`set_volume_tiers` validates the tier list before writing it to storage and
+rejects it (with `EscrowError::InvalidFee`) if:
+
+- the list is not strictly ascending by `volume_threshold` (this also rejects
+  duplicate thresholds), or
+- any tier's `discount_bps` exceeds `MAX_PLATFORM_FEE_BPS` (1000 bps = 10%)
+
+An empty tier vector is a valid, explicit way to disable tiering — all
+senders fall back to the base `platform_fee_bps`.
+
 ---
 
 ## Cross-Contract Interactions
