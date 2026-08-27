@@ -138,6 +138,76 @@ fn test_register_fleet_emits_event() {
 }
 
 #[test]
+fn test_admin_reassign_fleet_owner_resets_signers() {
+    let (env, client, admin) = setup_test();
+    let (fleet_id, owner, treasury) = register_fleet(&env, &client);
+    let signer2 = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(owner.clone());
+    signers.push_back(signer2);
+    client.configure_signers(&owner, &fleet_id, &signers, &2u32);
+
+    client.admin_reassign_fleet_owner(&admin, &fleet_id, &new_owner);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.owner, new_owner);
+    assert_eq!(profile.treasury, treasury);
+    assert_eq!(profile.signers.len(), 1u32);
+    assert_eq!(profile.signers.get(0).unwrap(), new_owner);
+    assert_eq!(profile.signature_threshold, 1u32);
+}
+
+#[test]
+fn test_admin_reassign_fleet_owner_requires_admin() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+    let attacker = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    let result = client.try_admin_reassign_fleet_owner(&attacker, &fleet_id, &new_owner);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::Unauthorized.into()),
+        _ => panic!("Expected FleetError::Unauthorized"),
+    }
+
+    assert_eq!(client.get_fleet(&fleet_id).owner, owner);
+}
+
+#[test]
+fn test_admin_force_update_treasury_bypasses_timelock_and_clears_pending_change() {
+    let (env, client, admin) = setup_test();
+    let (fleet_id, owner, old_treasury) = register_fleet(&env, &client);
+    let proposed_treasury = Address::generate(&env);
+    let emergency_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &proposed_treasury);
+    client.admin_force_update_treasury(&admin, &fleet_id, &emergency_treasury);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.treasury, emergency_treasury);
+    assert_ne!(profile.treasury, old_treasury);
+    assert_eq!(client.get_pending_treasury_update(&fleet_id), None);
+}
+
+#[test]
+fn test_admin_force_update_treasury_requires_admin() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, _owner, treasury) = register_fleet(&env, &client);
+    let attacker = Address::generate(&env);
+    let new_treasury = Address::generate(&env);
+
+    let result = client.try_admin_force_update_treasury(&attacker, &fleet_id, &new_treasury);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::Unauthorized.into()),
+        _ => panic!("Expected FleetError::Unauthorized"),
+    }
+
+    assert_eq!(client.get_fleet(&fleet_id).treasury, treasury);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_get_fleet_unknown_id_panics() {
     let (_env, client, _admin) = setup_test();

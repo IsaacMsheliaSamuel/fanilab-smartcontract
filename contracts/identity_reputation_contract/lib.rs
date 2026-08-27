@@ -200,7 +200,7 @@ impl IdentityReputationContract {
 
         let key = DataKey::UserProfile(user.clone());
         if env.storage().persistent().has(&key) {
-            panic_with_error!(&env, FaniLabError::AlreadyInitialized);
+            return env.storage().persistent().get(&key).unwrap();
         }
 
         env.storage().persistent().set(&key, &profile);

@@ -137,6 +137,29 @@ fn setup_full(
     (client, shipper, driver, recipient, escrow_id, reputation_id)
 }
 
+fn setup_with_identity(
+    env: &Env,
+) -> (DeliveryContractClient<'static>, Address, Address, Address) {
+    env.mock_all_auths();
+    let escrow_id = env.register(MockEscrowContract, ());
+    let delivery_id = env.register(DeliveryContract, ());
+    let identity_id = env.register(identity_reputation_contract::IdentityReputationContract, ());
+    let client = DeliveryContractClient::new(env, &delivery_id);
+    let admin = Address::generate(env);
+    let recipient = Address::generate(env);
+    let dispute_id = Address::generate(env);
+
+    client.init(&admin, &escrow_id);
+    let identity_client = identity_reputation_contract::IdentityReputationContractClient::new(
+        env,
+        &identity_id,
+    );
+    identity_client.init(&admin, &delivery_id, &dispute_id);
+    client.set_identity_reputation_contract(&admin, &identity_id);
+
+    (client, admin, recipient, identity_id)
+}
+
 fn get_test_metadata(env: &Env, delivery_id: u64) -> DeliveryMetadata {
     use shared_types::{CargoCategory, CargoDescriptor};
     DeliveryMetadata {
@@ -1345,6 +1368,41 @@ fn test_create_deliveries_batch_registers_users() {
         last_registered, recipient,
         "Expected recipient to be registered after create_deliveries_batch"
     );
+}
+
+#[test]
+fn test_create_delivery_allows_existing_identity_profiles() {
+    let env = Env::default();
+    let (client, sender, recipient, identity_id) = setup_with_identity(&env);
+    let metadata = get_test_metadata(&env, 1);
+
+    client.create_delivery(&sender, &recipient, &metadata);
+    client.create_delivery(&sender, &recipient, &metadata);
+
+    let identity_client = identity_reputation_contract::IdentityReputationContractClient::new(
+        &env,
+        &identity_id,
+    );
+    assert_eq!(identity_client.get_user_profile(&sender).address, sender);
+    assert_eq!(identity_client.get_user_profile(&recipient).address, recipient);
+}
+
+#[test]
+fn test_create_deliveries_batch_allows_existing_identity_profiles() {
+    let env = Env::default();
+    let (client, sender, recipient, identity_id) = setup_with_identity(&env);
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 1));
+
+    client.create_deliveries_batch(&sender, &recipient, &metadata_list);
+    client.create_deliveries_batch(&sender, &recipient, &metadata_list);
+
+    let identity_client = identity_reputation_contract::IdentityReputationContractClient::new(
+        &env,
+        &identity_id,
+    );
+    assert_eq!(identity_client.get_user_profile(&sender).address, sender);
+    assert_eq!(identity_client.get_user_profile(&recipient).address, recipient);
 }
 
 #[test]
