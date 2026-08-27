@@ -1471,6 +1471,14 @@ Retrieve a user's profile.
 **Errors:**
 - `ProviderNotFound` - User profile does not exist
 
+#### `has_user_profile`
+Check whether a user profile exists.
+
+**Parameters:**
+- `user: Address` - User address
+
+**Returns:** `bool`
+
 ### Reputation Management
 
 #### `increase_reputation`

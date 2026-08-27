@@ -1,5 +1,6 @@
 #![no_std]
 
+use identity_reputation_contract::IdentityReputationContractClient;
 use shared_types::FaniLabError;
 use shared_types::{
     delivery_key, events, is_admin, ttl, DeliveryConfirmedEvent, DeliveryCreatedEvent,
@@ -14,6 +15,23 @@ use soroban_sdk::{
 
 /// Maximum deliveries per batch to stay within Soroban resource limits.
 pub const MAX_BATCH_SIZE: u32 = 100;
+
+fn ensure_user_profile(env: &Env, identity_contract: &Address, user: &Address) {
+    use soroban_sdk::IntoVal;
+
+    let has_profile: bool = env.invoke_contract(
+        identity_contract,
+        &Symbol::new(env, "has_user_profile"),
+        soroban_sdk::vec![env, user.clone().into_val(env)],
+    );
+    if !has_profile {
+        let _: shared_types::UserProfile = env.invoke_contract(
+            identity_contract,
+            &Symbol::new(env, "register_user"),
+            soroban_sdk::vec![env, user.clone().into_val(env)],
+        );
+    }
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -39,6 +57,8 @@ pub enum DeliveryError {
     /// never valid — enforced both at assignment time and again at
     /// confirmation time as a defense-in-depth check.
     InvalidDriver = 4,
+    /// Sender and recipient must be different parties.
+    InvalidParties = 5,
 }
 
 mod constants {
@@ -158,21 +178,16 @@ impl DeliveryContract {
     ) -> DeliveryId {
         sender.require_auth();
 
+        if sender == recipient {
+            panic_with_error!(&env, DeliveryError::InvalidParties);
+        }
+
         validate_delivery_metadata(&env, &metadata)
             .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
 
         if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
-            use soroban_sdk::IntoVal;
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, sender.clone().into_val(&env)],
-            );
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
-            );
+            ensure_user_profile(&env, &identity_contract, &sender);
+            ensure_user_profile(&env, &identity_contract, &recipient);
         }
 
         let mut counter: u64 = env
@@ -275,18 +290,16 @@ impl DeliveryContract {
             panic_with_error!(&env, DeliveryError::BatchTooLarge);
         }
 
+        for i in 0..metadata_list.len() {
+            if let Some(metadata) = metadata_list.get(i) {
+                validate_delivery_metadata(&env, &metadata)
+                    .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
+            }
+        }
+
         if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
-            use soroban_sdk::IntoVal;
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, sender.clone().into_val(&env)],
-            );
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
-            );
+            ensure_user_profile(&env, &identity_contract, &sender);
+            ensure_user_profile(&env, &identity_contract, &recipient);
         }
 
         let mut result = soroban_sdk::Vec::new(&env);
@@ -697,17 +710,12 @@ impl DeliveryContract {
     }
 
     pub fn get_driver_profile(env: Env, driver: Address) -> DriverProfile {
-        let driver_key = StorageKey::DriverProfile(driver.clone());
-        env.storage()
-            .persistent()
-            .get(&driver_key)
-            .unwrap_or_else(|| DriverProfile {
-                address: driver,
-                deliveries_completed: 0,
-                reputation_score: 0,
-                registered_at: env.ledger().timestamp(),
-                kyc_verified: false,
-            })
+        let identity_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::IdentityReputationContract)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
+        IdentityReputationContractClient::new(&env, &identity_contract).get_driver_profile(&driver)
     }
 
     pub fn get_delivery(env: Env, delivery_id: DeliveryId) -> DeliveryRecord {

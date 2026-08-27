@@ -82,6 +82,10 @@ pub struct MockReputationContract;
 
 #[contractimpl]
 impl MockReputationContract {
+    pub fn has_user_profile(_env: Env, _user: Address) -> bool {
+        false
+    }
+
     pub fn register_user(_env: Env, user: Address) -> shared_types::UserProfile {
         _env.storage()
             .temporary()
@@ -151,6 +155,75 @@ fn get_test_metadata(env: &Env, delivery_id: u64) -> DeliveryMetadata {
         created_at: env.ledger().timestamp(),
         estimated_delivery: env.ledger().timestamp() + 86400,
     }
+}
+
+#[test]
+#[should_panic(expected = "5")] // DeliveryError::InvalidParties
+fn create_delivery_rejects_same_sender_and_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let escrow_id = env.register(MockEscrowContract, ());
+    let contract_id = env.register(DeliveryContract, ());
+    let client = DeliveryContractClient::new(&env, &contract_id);
+    let sender_and_recipient = Address::generate(&env);
+    client.init(&sender_and_recipient, &escrow_id);
+
+    client.create_delivery(
+        &sender_and_recipient,
+        &sender_and_recipient,
+        &get_test_metadata(&env, 1),
+    );
+}
+
+#[test]
+fn create_delivery_and_batch_are_idempotent_for_identity_registration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let identity_id = env.register(identity_reputation_contract::IdentityReputationContract, ());
+    let escrow_id = env.register(MockEscrowContract, ());
+    let contract_id = env.register(DeliveryContract, ());
+    let client = DeliveryContractClient::new(&env, &contract_id);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.init(&sender, &escrow_id);
+    client.set_identity_reputation_contract(&sender, &identity_id);
+
+    client.create_delivery(&sender, &recipient, &get_test_metadata(&env, 1));
+    let second_id = client.create_delivery(&sender, &recipient, &get_test_metadata(&env, 2));
+
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 3));
+    let batch_ids = client.create_deliveries_batch(&sender, &recipient, &metadata_list);
+
+    assert_eq!(second_id.value(), 2);
+    assert_eq!(batch_ids.len(), 1);
+}
+
+#[test]
+fn get_driver_profile_reads_identity_reputation_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let identity_id = env.register(identity_reputation_contract::IdentityReputationContract, ());
+    let identity_client =
+        identity_reputation_contract::IdentityReputationContractClient::new(&env, &identity_id);
+    let driver = Address::generate(&env);
+    env.ledger().set_timestamp(100);
+    identity_client.register_driver(&driver);
+
+    env.ledger().set_timestamp(200);
+    let escrow_id = env.register(MockEscrowContract, ());
+    let delivery_id = env.register(DeliveryContract, ());
+    let delivery_client = DeliveryContractClient::new(&env, &delivery_id);
+    let admin = Address::generate(&env);
+    delivery_client.init(&admin, &escrow_id);
+    delivery_client.set_identity_reputation_contract(&admin, &identity_id);
+
+    let profile = delivery_client.get_driver_profile(&driver);
+
+    assert_eq!(profile.address, driver);
+    assert_eq!(profile.reputation_score, 50);
+    assert_eq!(profile.registered_at, 100);
 }
 
 fn get_test_metadata_with_estimate(
@@ -836,6 +909,21 @@ fn test_accept_minimum_valid_weight() {
 
     let delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
     assert_eq!(delivery_id, 1);
+}
+
+#[test]
+#[should_panic(expected = "2")] // DeliveryError::InvalidMetadata
+fn test_batch_rejects_invalid_metadata() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 1));
+
+    let mut invalid_metadata = get_test_metadata(&env, 2);
+    invalid_metadata.origin = String::from_str(&env, "");
+    metadata_list.push_back(invalid_metadata);
+
+    client.create_deliveries_batch(&shipper, &recipient, &metadata_list);
 }
 
 #[test]

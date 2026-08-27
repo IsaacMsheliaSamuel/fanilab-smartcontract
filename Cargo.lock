@@ -493,6 +493,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 name = "delivery_contract"
 version = "0.2.0"
 dependencies = [
+ "identity_reputation_contract",
  "shared_types",
  "soroban-sdk",
 ]

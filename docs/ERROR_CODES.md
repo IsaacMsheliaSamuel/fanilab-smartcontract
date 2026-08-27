@@ -63,6 +63,7 @@ tables when debugging an error from this contract.
 | 2 | `InvalidMetadata` | Delivery metadata fails validation (e.g. location or weight limits). |
 | 3 | `BatchTooLarge` | `create_deliveries_batch` list exceeds `MAX_BATCH_SIZE` (100). |
 | 4 | `InvalidDriver` | Driver address matches the delivery's sender or recipient. |
+| 5 | `InvalidParties` | Sender and recipient are the same address. |
 
 `delivery_contract` also raises `FaniLabError` directly (e.g. `Unauthorized`,
 `DeliveryNotFound`, `NotInitialized`).
