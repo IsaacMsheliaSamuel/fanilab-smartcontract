@@ -145,14 +145,17 @@ fn payout_driver(
     );
 }
 
-fn settle_escrow_funds(env: &Env, record: &EscrowRecord, fleet_management_addr: Option<Address>) {
-    let platform_fee_bps: u32 = env
-        .storage()
-        .instance()
-        .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
-        .map(|config| config.platform_fee_bps)
-        .unwrap_or(0);
-    let platform_fee = calculate_fee(record.amount, platform_fee_bps);
+/// Settles the fund movement for a payout, using `platform_fee` as the
+/// single source of truth for the fee already computed by the caller
+/// (e.g. via `get_effective_fee_bps`). This function must never re-derive
+/// the fee itself, so that the amount actually transferred always matches
+/// the amount reported in the caller's emitted event.
+fn settle_escrow_funds(
+    env: &Env,
+    record: &EscrowRecord,
+    fleet_management_addr: Option<Address>,
+    platform_fee: i128,
+) {
     let driver_amount = record.amount.saturating_sub(platform_fee);
 
     payout_driver(
@@ -899,7 +902,7 @@ impl EscrowContract {
         );
 
         let fleet_management = get_fleet_management_contract(&env);
-        settle_escrow_funds(&env, &record, fleet_management);
+        settle_escrow_funds(&env, &record, fleet_management, platform_fee);
 
         env.events().publish(
             (events::escrow_released(&env),),
@@ -1027,6 +1030,7 @@ impl EscrowContract {
         // Checks + effects (state) are resolved per-branch first; the actual
         // fund transfer (interaction) happens only after all state below is
         // committed, per checks-effects-interactions.
+        let mut platform_fee: i128 = 0;
         let fleet_management: Option<Address> = if release_to_driver {
             let base_fee_bps: u32 = env
                 .storage()
@@ -1037,8 +1041,7 @@ impl EscrowContract {
 
             let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
             let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
-            let platform_fee = calculate_fee(record.amount, effective_fee_bps);
-            let _driver_amount = record.amount.saturating_sub(platform_fee);
+            platform_fee = calculate_fee(record.amount, effective_fee_bps);
 
             let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
             env.storage()
@@ -1071,7 +1074,7 @@ impl EscrowContract {
         );
 
         if release_to_driver {
-            settle_escrow_funds(&env, &record, fleet_management);
+            settle_escrow_funds(&env, &record, fleet_management, platform_fee);
         } else {
             token::Client::new(&env, &record.token).transfer(
                 &env.current_contract_address(),
@@ -1208,7 +1211,7 @@ impl EscrowContract {
         );
 
         let fleet_management = get_fleet_management_contract(&env);
-        settle_escrow_funds(&env, &record, fleet_management);
+        settle_escrow_funds(&env, &record, fleet_management, platform_fee);
 
         env.events().publish(
             (events::escrow_released(&env), delivery_id),
