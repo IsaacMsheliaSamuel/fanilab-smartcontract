@@ -36,6 +36,7 @@ pub enum FleetError {
     NoPendingTreasuryChange = 8,
     TimelockNotElapsed = 9,
     FleetInactive = 10,
+    InvalidConfiguration = 11,
 }
 
 #[contracttype]
@@ -85,8 +86,8 @@ pub enum DataKey {
     Fleet(FleetId),
     /// Persistent key — driver's status within a fleet (Pending | Active).
     DriverFleet(FleetId, Address),
-    /// Persistent key — roster of drivers (addresses) in a fleet, for enumeration.
-    FleetRoster(FleetId),
+    /// Persistent key — one active roster entry, keyed by fleet and index.
+    FleetRoster(FleetId, u32),
     /// Persistent key — pending, not-yet-confirmed treasury change for a fleet.
     PendingTreasury(FleetId),
 }
@@ -646,6 +647,11 @@ impl FleetManagementContract {
             DriverFleetStatus::Removed => panic_with_error!(&env, FleetError::InviteNotFound),
         }
 
+        // Guard against unbounded roster growth before changing membership state.
+        if profile.total_active_drivers >= MAX_ROSTER_SIZE {
+            panic_with_error!(&env, FleetError::FleetNotFound);
+        }
+
         // Promote driver to active.
         env.storage()
             .persistent()
@@ -666,39 +672,15 @@ impl FleetManagementContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        // Add driver to fleet roster for enumeration.
-        let roster_key = DataKey::FleetRoster(fleet_id);
-        let mut roster: soroban_sdk::Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&roster_key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
-
-        // Guard against unbounded roster growth.
-        if roster.len() >= MAX_ROSTER_SIZE {
-            panic_with_error!(&env, FleetError::FleetNotFound);
-        }
-
-        // Avoid duplicate roster entries: check if driver already in roster.
-        let mut already_in_roster = false;
-        for i in 0..roster.len() {
-            if let Some(existing) = roster.get(i) {
-                if existing == driver {
-                    already_in_roster = true;
-                    break;
-                }
-            }
-        }
-
-        if !already_in_roster {
-            roster.push_back(driver.clone());
-            env.storage().persistent().set(&roster_key, &roster);
-            env.storage().persistent().extend_ttl(
-                &roster_key,
-                ttl::LEDGER_TTL_THRESHOLD,
-                ttl::LEDGER_TTL_EXTEND_TO,
-            );
-        }
+        // Add the driver as one indexed roster entry. The previous active
+        // count is the next free roster index.
+        let roster_key = DataKey::FleetRoster(fleet_id, profile.total_active_drivers - 1);
+        env.storage().persistent().set(&roster_key, &driver);
+        env.storage().persistent().extend_ttl(
+            &roster_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Emit event.
         env.events().publish(
@@ -767,30 +749,43 @@ impl FleetManagementContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        // Remove driver from fleet roster.
-        let roster_key = DataKey::FleetRoster(fleet_id);
-        if let Some(roster) = env
-            .storage()
-            .persistent()
-            .get::<_, soroban_sdk::Vec<Address>>(&roster_key)
-        {
-            let mut new_roster = soroban_sdk::Vec::new(&env);
-            for i in 0..roster.len() {
-                if let Some(existing) = roster.get(i) {
-                    if existing != driver {
-                        new_roster.push_back(existing);
-                    }
+        // Remove the driver from the indexed roster and compact the remaining
+        // entries so enumeration stays contiguous without rewriting one large value.
+        if status == DriverFleetStatus::Active {
+            let roster_len = profile.total_active_drivers + 1;
+            let mut removed_index = None;
+            for index in 0..roster_len {
+                let roster_key = DataKey::FleetRoster(fleet_id, index);
+                if env
+                    .storage()
+                    .persistent()
+                    .get::<_, Address>(&roster_key)
+                    .is_some_and(|existing| existing == driver)
+                {
+                    removed_index = Some(index);
+                    break;
                 }
             }
-            if !new_roster.is_empty() {
-                env.storage().persistent().set(&roster_key, &new_roster);
-                env.storage().persistent().extend_ttl(
-                    &roster_key,
-                    ttl::LEDGER_TTL_THRESHOLD,
-                    ttl::LEDGER_TTL_EXTEND_TO,
-                );
-            } else {
-                env.storage().persistent().remove(&roster_key);
+
+            if let Some(index) = removed_index {
+                for next_index in index..(roster_len - 1) {
+                    let next_key = DataKey::FleetRoster(fleet_id, next_index + 1);
+                    let current_key = DataKey::FleetRoster(fleet_id, next_index);
+                    let next_driver: Address = env
+                        .storage()
+                        .persistent()
+                        .get(&next_key)
+                        .unwrap();
+                    env.storage().persistent().set(&current_key, &next_driver);
+                    env.storage().persistent().extend_ttl(
+                        &current_key,
+                        ttl::LEDGER_TTL_THRESHOLD,
+                        ttl::LEDGER_TTL_EXTEND_TO,
+                    );
+                }
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::FleetRoster(fleet_id, roster_len - 1));
             }
         }
 
@@ -843,14 +838,27 @@ impl FleetManagementContract {
             .get(&DataKey::DriverFleet(fleet_id, driver))
     }
 
-    /// Return the roster of all drivers (both Pending and Active) for a fleet.
-    /// Returns an empty Vec if no drivers are in the fleet.
+    /// Return the roster of all active drivers for a fleet.
+    /// Returns an empty Vec if no drivers are active in the fleet.
     pub fn get_fleet_roster(env: Env, fleet_id: FleetId) -> soroban_sdk::Vec<Address> {
-        let roster_key = DataKey::FleetRoster(fleet_id);
-        env.storage()
+        let mut roster = soroban_sdk::Vec::new(&env);
+        let active_count = env
+            .storage()
             .persistent()
-            .get(&roster_key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+            .get::<_, FleetProfile>(&DataKey::Fleet(fleet_id))
+            .map(|profile| profile.total_active_drivers)
+            .unwrap_or(0);
+
+        for index in 0..active_count {
+            if let Some(driver) = env
+                .storage()
+                .persistent()
+                .get::<_, Address>(&DataKey::FleetRoster(fleet_id, index))
+            {
+                roster.push_back(driver);
+            }
+        }
+        roster
     }
 
     /// Configure multi-signature requirements for a fleet.
@@ -877,7 +885,7 @@ impl FleetManagementContract {
         }
 
         if threshold == 0 || threshold > signers.len() {
-            panic_with_error!(&env, FleetError::Unauthorized);
+            panic_with_error!(&env, FleetError::InvalidConfiguration);
         }
 
         profile.signers = signers;

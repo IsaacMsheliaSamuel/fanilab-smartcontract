@@ -574,6 +574,7 @@ fn test_roster_full_lifecycle_add_accept_remove() {
         Some(DriverFleetStatus::Active)
     );
     assert_eq!(client.get_fleet(&fleet_id).total_active_drivers, 1);
+    assert_eq!(client.get_fleet_roster(&fleet_id), soroban_sdk::vec![&env, driver.clone()]);
 
     // Remove: record deleted, count decrements.
     client.remove_driver_from_fleet(&fleet_id, &owner, &driver);
@@ -582,6 +583,7 @@ fn test_roster_full_lifecycle_add_accept_remove() {
         Some(DriverFleetStatus::Removed)
     );
     assert_eq!(client.get_fleet(&fleet_id).total_active_drivers, 0);
+    assert!(client.get_fleet_roster(&fleet_id).is_empty());
 }
 
 #[test]
@@ -967,6 +969,39 @@ fn test_add_driver_authorized_signer_allowed() {
 
     let status = client.get_driver_fleet_status(&fleet_id, &driver);
     assert_eq!(status, Some(DriverFleetStatus::Pending));
+}
+
+#[test]
+fn test_configure_signers_rejects_invalid_threshold() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(owner.clone());
+
+    let result = client.try_configure_signers(&owner, &fleet_id, &signers, &2u32);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::InvalidConfiguration.into()),
+        _ => panic!("Expected FleetError::InvalidConfiguration"),
+    }
+}
+
+#[test]
+fn test_configure_signers_rejects_zero_threshold() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+    let signers = soroban_sdk::Vec::new(&env);
+
+    let result = client.try_configure_signers(&owner, &fleet_id, &signers, &0u32);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::InvalidConfiguration.into()),
+        _ => panic!("Expected FleetError::InvalidConfiguration"),
+    }
 }
 
 #[test]
