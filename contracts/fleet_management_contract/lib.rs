@@ -22,6 +22,22 @@ pub const MAX_ROSTER_SIZE: u32 = 10000;
 /// their future payouts are redirected (Issue #70).
 pub const TREASURY_CHANGE_TIMELOCK_SECONDS: u64 = 3 * 24 * 60 * 60; // 3 days
 
+fn require_signer_threshold(env: &Env, profile: &FleetProfile, caller: &Address) {
+    let mut authorized_signer_count = 0u32;
+    for i in 0..profile.signers.len() {
+        if let Some(signer) = profile.signers.get(i) {
+            if signer == *caller {
+                authorized_signer_count += 1;
+                break;
+            }
+        }
+    }
+
+    if authorized_signer_count < profile.signature_threshold {
+        panic_with_error!(env, FleetError::Unauthorized);
+    }
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -60,7 +76,9 @@ pub struct FleetProfile {
     pub signature_threshold: u32,
     /// Whether the fleet is currently operating. Set to `false` by
     /// `deactivate_fleet` (Issue #108); a deactivated fleet rejects new
-    /// driver invitations and no longer receives driver payouts.
+    /// driver invitations and is not selected for new driver payouts. Payout
+    /// destinations for existing escrows are fixed when those escrows are
+    /// created.
     pub active: bool,
 }
 
@@ -397,19 +415,7 @@ impl FleetManagementContract {
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        let mut authorized_signer_count = 0u32;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == owner {
-                    authorized_signer_count += 1;
-                    break;
-                }
-            }
-        }
-
-        if authorized_signer_count == 0 {
-            panic_with_error!(&env, FleetError::Unauthorized);
-        }
+        require_signer_threshold(&env, &profile, &owner);
 
         let activates_at = env
             .ledger()
@@ -518,19 +524,7 @@ impl FleetManagementContract {
             panic_with_error!(&env, FleetError::FleetInactive);
         }
 
-        let mut is_authorized_signer = false;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == caller {
-                    is_authorized_signer = true;
-                    break;
-                }
-            }
-        }
-
-        if !is_authorized_signer {
-            panic_with_error!(&env, FleetError::Unauthorized);
-        }
+        require_signer_threshold(&env, &profile, &caller);
 
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
 
@@ -586,19 +580,7 @@ impl FleetManagementContract {
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        let mut is_authorized_signer = false;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == owner {
-                    is_authorized_signer = true;
-                    break;
-                }
-            }
-        }
-
-        if !is_authorized_signer {
-            panic_with_error!(&env, FleetError::Unauthorized);
-        }
+        require_signer_threshold(&env, &profile, &owner);
 
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
         let status: DriverFleetStatus = env
@@ -727,19 +709,9 @@ impl FleetManagementContract {
         caller.require_auth();
 
         // Verify caller is authorised: must be either an authorized signer or the driver.
-        let mut is_authorized_signer = false;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == caller {
-                    is_authorized_signer = true;
-                    break;
-                }
-            }
-        }
-
         let is_driver = caller == driver;
-        if !is_authorized_signer && !is_driver {
-            panic_with_error!(&env, FleetError::Unauthorized);
+        if !is_driver {
+            require_signer_threshold(&env, &profile, &caller);
         }
 
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());

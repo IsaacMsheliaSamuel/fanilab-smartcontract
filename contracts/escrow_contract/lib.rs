@@ -92,20 +92,24 @@ fn payout_driver(
     amount: i128,
     fleet_management_addr: Option<&Address>,
     fleet_id: Option<u64>,
+    payout_address: Option<Address>,
 ) {
     if amount <= 0 {
         return;
     }
 
-    let mut payout_address = driver.clone();
+    let payout_was_snapshotted = payout_address.is_some();
+    let mut payout_address = payout_address.unwrap_or_else(|| driver.clone());
 
-    if let (Some(fleet_addr), Some(fid)) = (fleet_management_addr, fleet_id) {
-        let treasury: Address = env.invoke_contract(
-            fleet_addr,
-            &Symbol::new(env, "get_payout_address"),
-            soroban_sdk::vec![env, driver.into_val(env), fid.into_val(env)],
-        );
-        payout_address = treasury;
+    if !payout_was_snapshotted {
+        if let (Some(fleet_addr), Some(fid)) = (fleet_management_addr, fleet_id) {
+            let treasury: Address = env.invoke_contract(
+                fleet_addr,
+                &Symbol::new(env, "get_payout_address"),
+                soroban_sdk::vec![env, driver.into_val(env), fid.into_val(env)],
+            );
+            payout_address = treasury;
+        }
     }
 
     if let Some(settlement_addr) = get_settlement_contract(env) {
@@ -145,7 +149,12 @@ fn payout_driver(
     );
 }
 
-fn settle_escrow_funds(env: &Env, record: &EscrowRecord, fleet_management_addr: Option<Address>) {
+fn settle_escrow_funds(
+    env: &Env,
+    delivery_id: u64,
+    record: &EscrowRecord,
+    fleet_management_addr: Option<Address>,
+) {
     let platform_fee_bps: u32 = env
         .storage()
         .instance()
@@ -162,6 +171,9 @@ fn settle_escrow_funds(env: &Env, record: &EscrowRecord, fleet_management_addr: 
         driver_amount,
         fleet_management_addr.as_ref(),
         record.fleet_id,
+        env.storage()
+            .persistent()
+            .get(&DataKey::EscrowPayoutAddress(delivery_id)),
     );
 
     if platform_fee > 0 {
@@ -218,6 +230,8 @@ enum DataKey {
     Paused,
     FleetManagementContract,
     DisputeResolutionContract,
+    /// Payout destination snapshotted when an escrow is created.
+    EscrowPayoutAddress(u64),
     /// Track total locked value per token
     TotalLocked(Address),
     /// Track sender volume (number of completed deliveries)
@@ -612,6 +626,18 @@ impl EscrowContract {
         if token != config.token {
             panic_with_error!(&env, EscrowError::InvalidToken);
         }
+        let payout_address = if let (Some(fleet_addr), Some(fid)) =
+            (get_fleet_management_contract(&env), fleet_id)
+        {
+            Some(env.invoke_contract(
+                &fleet_addr,
+                &Symbol::new(&env, "get_payout_address"),
+                soroban_sdk::vec![&env, driver.clone().into_val(&env), fid.into_val(&env)],
+            ))
+        } else {
+            None
+        };
+
         token::Client::new(&env, &token).transfer(&sender, env.current_contract_address(), &amount);
         let record_token_clone = token.clone();
         let created_at = env.ledger().timestamp();
@@ -633,6 +659,15 @@ impl EscrowContract {
                 fleet_id,
             },
         );
+        if let Some(payout_address) = payout_address {
+            let payout_key = DataKey::EscrowPayoutAddress(delivery_id);
+            env.storage().persistent().set(&payout_key, &payout_address);
+            env.storage().persistent().extend_ttl(
+                &payout_key,
+                ttl::LEDGER_TTL_THRESHOLD,
+                ttl::LEDGER_TTL_EXTEND_TO,
+            );
+        }
 
         // Update secondary indexes.
         let sender_key = DataKey::EscrowsBySender(sender.clone());
@@ -899,7 +934,7 @@ impl EscrowContract {
         );
 
         let fleet_management = get_fleet_management_contract(&env);
-        settle_escrow_funds(&env, &record, fleet_management);
+        settle_escrow_funds(&env, delivery_id, &record, fleet_management);
 
         env.events().publish(
             (events::escrow_released(&env),),
@@ -1071,7 +1106,7 @@ impl EscrowContract {
         );
 
         if release_to_driver {
-            settle_escrow_funds(&env, &record, fleet_management);
+            settle_escrow_funds(&env, delivery_id, &record, fleet_management);
         } else {
             token::Client::new(&env, &record.token).transfer(
                 &env.current_contract_address(),
@@ -1208,7 +1243,7 @@ impl EscrowContract {
         );
 
         let fleet_management = get_fleet_management_contract(&env);
-        settle_escrow_funds(&env, &record, fleet_management);
+        settle_escrow_funds(&env, delivery_id, &record, fleet_management);
 
         env.events().publish(
             (events::escrow_released(&env), delivery_id),

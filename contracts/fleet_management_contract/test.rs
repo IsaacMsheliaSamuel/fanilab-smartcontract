@@ -887,6 +887,40 @@ fn test_configure_signers_adds_multiple_signers() {
 }
 
 #[test]
+fn test_signer_threshold_is_enforced_for_fleet_actions() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+    let pending_driver = Address::generate(&env);
+    let active_driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &pending_driver);
+    client.add_driver_to_fleet(&owner, &fleet_id, &active_driver);
+    client.accept_fleet_invite(&fleet_id, &active_driver);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(owner.clone());
+    signers.push_back(signer2);
+    client.configure_signers(&owner, &fleet_id, &signers, &2u32);
+
+    let new_treasury = Address::generate(&env);
+    assert!(client
+        .try_update_fleet_treasury(&owner, &fleet_id, &new_treasury)
+        .is_err());
+    assert!(client
+        .try_add_driver_to_fleet(&owner, &fleet_id, &Address::generate(&env))
+        .is_err());
+    assert!(client
+        .try_cancel_invite(&owner, &fleet_id, &pending_driver)
+        .is_err());
+    assert!(client
+        .try_remove_driver_from_fleet(&fleet_id, &owner, &active_driver)
+        .is_err());
+}
+
+#[test]
 fn test_configure_signers_unauthorized_not_owner() {
     let (env, client, _admin) = setup_test();
 
@@ -1092,6 +1126,100 @@ fn test_escrow_payout_routes_through_fleet_treasury() {
 
     let token_client = TokenClient::new(&env, &token);
     assert_eq!(token_client.balance(&fleet_treasury), 1000);
+    assert_eq!(token_client.balance(&driver), 0);
+}
+
+#[test]
+fn test_escrow_payout_keeps_treasury_after_fleet_deactivation() {
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let fleet_contract_id = env.register(FleetManagementContract, ());
+    let fleet_client = FleetManagementContractClient::new(&env, &fleet_contract_id);
+    let fleet_admin = Address::generate(&env);
+    fleet_client.init(&fleet_admin);
+
+    let escrow_contract_id = env.register(EscrowContract, ());
+    let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
+    let escrow_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(escrow_admin.clone())
+        .address();
+    escrow_client.init(&escrow_admin, &token, &0);
+    escrow_client.set_fleet_management_contract(&escrow_admin, &fleet_contract_id);
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = fleet_client.register_fleet(&owner, &treasury);
+    let driver = Address::generate(&env);
+    fleet_client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    fleet_client.accept_fleet_invite(&fleet_id, &driver);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &43,
+        &token,
+        &1000,
+        &Some(fleet_id),
+    );
+    fleet_client.deactivate_fleet(&owner, &fleet_id);
+    escrow_client.release_escrow(&recipient, &43);
+
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&treasury), 1000);
+    assert_eq!(token_client.balance(&driver), 0);
+}
+
+#[test]
+fn test_escrow_payout_keeps_treasury_after_driver_removal() {
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let fleet_contract_id = env.register(FleetManagementContract, ());
+    let fleet_client = FleetManagementContractClient::new(&env, &fleet_contract_id);
+    let fleet_admin = Address::generate(&env);
+    fleet_client.init(&fleet_admin);
+
+    let escrow_contract_id = env.register(EscrowContract, ());
+    let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
+    let escrow_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(escrow_admin.clone())
+        .address();
+    escrow_client.init(&escrow_admin, &token, &0);
+    escrow_client.set_fleet_management_contract(&escrow_admin, &fleet_contract_id);
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = fleet_client.register_fleet(&owner, &treasury);
+    let driver = Address::generate(&env);
+    fleet_client.add_driver_to_fleet(&owner, &fleet_id, &driver);
+    fleet_client.accept_fleet_invite(&fleet_id, &driver);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &44,
+        &token,
+        &1000,
+        &Some(fleet_id),
+    );
+    fleet_client.remove_driver_from_fleet(&fleet_id, &owner, &driver);
+    escrow_client.release_escrow(&recipient, &44);
+
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&treasury), 1000);
     assert_eq!(token_client.balance(&driver), 0);
 }
 

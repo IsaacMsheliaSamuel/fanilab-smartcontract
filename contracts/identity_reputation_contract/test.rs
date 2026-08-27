@@ -272,6 +272,14 @@ fn test_set_reputation_config_unauthorized() {
 // Cross-contract wiring updates
 
 #[test]
+fn test_init_stores_cross_contract_addresses() {
+    let (env, _, client, delivery_contract, dispute_contract) = setup();
+
+    assert_eq!(client.get_delivery_contract(), delivery_contract);
+    assert_eq!(client.get_dispute_contract(), dispute_contract);
+}
+
+#[test]
 fn test_admin_can_repoint_cross_contracts() {
     let (env, admin, client, _, _) = setup();
     let driver = Address::generate(&env);
