@@ -384,6 +384,84 @@ fn test_raise_dispute_delivered_exceeds_time_limit() {
 }
 
 #[test]
+fn test_update_dispute_time_limit_allows_below_minimum_and_getter_returns_value() {
+    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    dispute_client.update_dispute_time_limit(&admin, &1000);
+
+    assert_eq!(dispute_client.get_dispute_time_limit(), 1000);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
+fn test_updated_dispute_time_limit_shortens_delivered_dispute_window() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    dispute_client.update_dispute_time_limit(&admin, &1000);
+
+    let delivered_at = env.ledger().timestamp();
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(11),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Delivered,
+        Some(delivered_at),
+    );
+    set_mock_delivery(&env, &delivery_id, did(11), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender,
+        recipient.clone(),
+        driver,
+        token,
+        shared_types::EscrowStatus::Released,
+    );
+    set_mock_escrow(&env, &escrow_id, 11, &escrow_record);
+
+    env.ledger().set_timestamp(delivered_at + 1001);
+    dispute_client.raise_dispute(&recipient, &did(11));
+}
+
+#[test]
+fn test_set_dispute_resolution_limit_getter_and_force_resolution_window() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    dispute_client.set_dispute_resolution_limit(&admin, &1000);
+    assert_eq!(dispute_client.get_dispute_resolution_limit(), 1000);
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(12),
+        sender.clone(),
+        recipient,
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(12), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        delivery_record.sender.clone(),
+        driver,
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(&env, &escrow_id, 12, &escrow_record);
+
+    dispute_client.raise_dispute(&sender, &did(12));
+    env.ledger().set_timestamp(1001);
+    dispute_client.force_resolve_dispute(&sender, &did(12));
+
+    assert_eq!(
+        dispute_client.get_dispute(&did(12)).status,
+        DisputeStatus::Split
+    );
+}
+
+#[test]
 fn test_resolve_dispute_refund_sender_by_admin() {
     let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
         setup_test();

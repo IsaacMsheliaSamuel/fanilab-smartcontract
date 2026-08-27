@@ -208,6 +208,60 @@ fn test_happy_path_full_lifecycle() {
     );
 }
 
+#[test]
+fn test_delivery_secondary_indexes_track_sender_and_recipient() {
+    let env = Env::default();
+    let (client, shipper, _driver, recipient, _escrow_id, _) = setup_full(&env);
+    let other_shipper = Address::generate(&env);
+    let other_recipient = Address::generate(&env);
+
+    let first_id = client.create_delivery(&shipper, &recipient, &get_test_metadata(&env, 1));
+    let second_id = client.create_delivery(&shipper, &other_recipient, &get_test_metadata(&env, 2));
+    let third_id = client.create_delivery(
+        &other_shipper,
+        &recipient,
+        &get_test_metadata(&env, 3),
+    );
+
+    let shipper_deliveries = client.get_deliveries_by_sender(&shipper);
+    assert_eq!(shipper_deliveries.len(), 2);
+    assert_eq!(shipper_deliveries.get(0), Some(first_id));
+    assert_eq!(shipper_deliveries.get(1), Some(second_id));
+
+    let recipient_deliveries = client.get_deliveries_by_recipient(&recipient);
+    assert_eq!(recipient_deliveries.len(), 2);
+    assert_eq!(recipient_deliveries.get(0), Some(first_id));
+    assert_eq!(recipient_deliveries.get(1), Some(third_id));
+
+    assert_eq!(client.get_deliveries_by_sender(&Address::generate(&env)).len(), 0);
+}
+
+#[test]
+fn test_delivery_batch_secondary_indexes_append_ids() {
+    let env = Env::default();
+    let (client, shipper, _driver, recipient, _escrow_id, _) = setup_full(&env);
+
+    let first_id = client.create_delivery(&shipper, &recipient, &get_test_metadata(&env, 1));
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 2));
+    metadata_list.push_back(get_test_metadata(&env, 3));
+
+    let batch_ids = client.create_deliveries_batch(&shipper, &recipient, &metadata_list);
+    assert_eq!(batch_ids.len(), 2);
+
+    let sender_deliveries = client.get_deliveries_by_sender(&shipper);
+    assert_eq!(sender_deliveries.len(), 3);
+    assert_eq!(sender_deliveries.get(0), Some(first_id));
+    assert_eq!(sender_deliveries.get(1), batch_ids.get(0));
+    assert_eq!(sender_deliveries.get(2), batch_ids.get(1));
+
+    let recipient_deliveries = client.get_deliveries_by_recipient(&recipient);
+    assert_eq!(recipient_deliveries.len(), 3);
+    assert_eq!(recipient_deliveries.get(0), Some(first_id));
+    assert_eq!(recipient_deliveries.get(1), batch_ids.get(0));
+    assert_eq!(recipient_deliveries.get(2), batch_ids.get(1));
+}
+
 // ── CANCELLATION PATH ───────────────────────────────────────────────────────
 
 #[test]
