@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
 
+# Least-privilege default for the workflow. The release job raises its own
+# scope explicitly below (see #244).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,7 +17,13 @@ jobs:
   create_release:
     name: Create Release
     runs-on: ubuntu-latest
-    
+    # Creating a GitHub release and uploading assets needs `contents: write`
+    # and nothing else. Declared at the job level so the workflow behaves
+    # correctly regardless of the repository/organization default token
+    # scope (read-only or read-write).
+    permissions:
+      contents: write
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v7
@@ -22,8 +33,43 @@ jobs:
       with:
         targets: wasm32v1-none
 
+    - name: Validate tag matches crate versions
+      run: |
+        set -euo pipefail
+
+        # Tags are v-prefixed (v0.2.0); manifests are not (0.2.0). A
+        # pre-release suffix, if present, is compared verbatim: a tag
+        # v0.3.0-rc1 requires the manifests to declare 0.3.0-rc1.
+        TAG_VERSION="${GITHUB_REF#refs/tags/}"
+        TAG_VERSION="${TAG_VERSION#v}"
+        echo "Release tag version: ${TAG_VERSION}"
+
+        # Read every workspace crate version without hand-parsing TOML.
+        # --no-deps restricts output to the workspace members.
+        CRATE_VERSIONS="$(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] | "\(.name) \(.version)"' | sort)"
+        echo "Declared crate versions:"
+        echo "${CRATE_VERSIONS}"
+
+        # 1. Every workspace crate must agree with every other crate.
+        UNIQUE_VERSIONS="$(echo "${CRATE_VERSIONS}" | awk '{print $2}' | sort -u)"
+        if [ "$(echo "${UNIQUE_VERSIONS}" | wc -l)" -ne 1 ]; then
+          echo "::error::Workspace crates declare disagreeing versions:"
+          echo "${CRATE_VERSIONS}"
+          exit 1
+        fi
+        MANIFEST_VERSION="${UNIQUE_VERSIONS}"
+
+        # 2. The agreed crate version must match the release tag.
+        if [ "${TAG_VERSION}" != "${MANIFEST_VERSION}" ]; then
+          echo "::error::Release tag version (${TAG_VERSION}) does not match the crate manifest version (${MANIFEST_VERSION}). Update contracts/*/Cargo.toml to ${TAG_VERSION} or push a v${MANIFEST_VERSION} tag instead."
+          exit 1
+        fi
+
+        echo "Tag v${TAG_VERSION} matches all workspace crate manifests."
+
     - name: Build Release Contracts
-      run: cargo build --target wasm32v1-none --release
+      run: cargo build --locked --target wasm32v1-none --release
 
     - name: Optimize WASM
       run: |
@@ -40,20 +86,28 @@ jobs:
 
     - name: Create Release Notes
       run: |
-        echo "# FaniLab Smart Contracts ${GITHUB_REF#refs/tags/}" > RELEASE_NOTES.md
-        echo "" >> RELEASE_NOTES.md
-        echo "## Contracts" >> RELEASE_NOTES.md
-        echo "- Escrow Contract" >> RELEASE_NOTES.md
-        echo "- Delivery Contract" >> RELEASE_NOTES.md
-        echo "- Dispute Resolution Contract" >> RELEASE_NOTES.md
-        echo "- Fleet Management Contract" >> RELEASE_NOTES.md
-        echo "- Identity Reputation Contract" >> RELEASE_NOTES.md
-        echo "- Settlement Contract" >> RELEASE_NOTES.md
-        echo "" >> RELEASE_NOTES.md
-        echo "## Checksums" >> RELEASE_NOTES.md
-        echo "\`\`\`" >> RELEASE_NOTES.md
-        cat release_artifacts/SHA256SUMS.txt >> RELEASE_NOTES.md
-        echo "\`\`\`" >> RELEASE_NOTES.md
+        set -euo pipefail
+        TAG="${GITHUB_REF#refs/tags/}"
+        {
+          echo "# FaniLab Smart Contracts ${TAG}"
+          echo ""
+          echo "## Contracts"
+          # Derived from the artifacts that were actually built, the same
+          # directory the checksum step iterates, so the contract list and
+          # the checksum block below always describe the same set (see #245).
+          for wasm in release_artifacts/*.wasm; do
+            crate="$(basename "$wasm" .wasm)"
+            # snake_case crate name -> Title Case display name
+            display="$(echo "$crate" | tr '_' ' ' \
+              | awk '{for (i = 1; i <= NF; i++) $i = toupper(substr($i, 1, 1)) substr($i, 2)} 1')"
+            echo "- ${display}"
+          done
+          echo ""
+          echo "## Checksums"
+          echo '```'
+          cat release_artifacts/SHA256SUMS.txt
+          echo '```'
+        } > RELEASE_NOTES.md
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v3
@@ -66,4 +120,3 @@ jobs:
         prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
