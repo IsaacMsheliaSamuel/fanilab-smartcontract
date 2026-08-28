@@ -658,6 +658,40 @@ pub struct UserProfile {
     pub registered_at: u64,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CargoCategory {
+    Documents,
+    Electronics,
+    Perishables,
+    Clothing,
+    General,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CargoDescriptor {
+    pub weight_grams: u32,
+    pub category: CargoCategory,
+    pub fragile: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryMetadata {
+    /// Not caller-authoritative: `delivery_contract` overwrites this with
+    /// the internally generated `DeliveryId` on every create/update call,
+    /// discarding whatever value the caller supplied. Kept as a field
+    /// (rather than removed) so a `DeliveryMetadata` read back from storage
+    /// is self-describing without a second lookup.
+    pub delivery_id: u64,
+    pub origin: String,
+    pub destination: String,
+    pub cargo_description: CargoDescriptor,
+    pub created_at: u64,
+    pub estimated_delivery: u64,
+}
+
 #[cfg(test)]
 mod test {
     use super::{
@@ -1056,38 +1090,4 @@ mod test {
         assert_eq!(profile.address, address);
         assert_eq!(profile.registered_at, 2000000);
     }
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CargoCategory {
-    Documents,
-    Electronics,
-    Perishables,
-    Clothing,
-    General,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CargoDescriptor {
-    pub weight_grams: u32,
-    pub category: CargoCategory,
-    pub fragile: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeliveryMetadata {
-    /// Not caller-authoritative: `delivery_contract` overwrites this with
-    /// the internally generated `DeliveryId` on every create/update call,
-    /// discarding whatever value the caller supplied. Kept as a field
-    /// (rather than removed) so a `DeliveryMetadata` read back from storage
-    /// is self-describing without a second lookup.
-    pub delivery_id: u64,
-    pub origin: String,
-    pub destination: String,
-    pub cargo_description: CargoDescriptor,
-    pub created_at: u64,
-    pub estimated_delivery: u64,
 }

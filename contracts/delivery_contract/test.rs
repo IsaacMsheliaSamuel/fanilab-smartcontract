@@ -1,10 +1,22 @@
 extern crate std;
 
 use super::*;
+use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Address, Env, String, Symbol,
 };
+
+proptest! {
+    #[test]
+    fn transition_matrix_is_exact(from in 0u8..6, to in 0u8..6) {
+        let states = [DeliveryStatus::Pending, DeliveryStatus::Active,
+            DeliveryStatus::InTransit, DeliveryStatus::Delivered,
+            DeliveryStatus::Disputed, DeliveryStatus::Cancelled];
+        let expected = matches!((from, to), (0,1)|(0,5)|(1,2)|(1,4)|(1,5)|(2,3)|(2,4)|(3,4)|(4,3));
+        prop_assert_eq!(validate_transition(states[from as usize], states[to as usize]).is_ok(), expected);
+    }
+}
 
 // ── Issue #95: State Rollback on Escrow Failure ──────────────────────────────────────────────────
 // This module implements comprehensive testing for the contract's safety invariant:
@@ -33,7 +45,7 @@ impl MockEscrowContract {
         }
         _env.storage()
             .temporary()
-            .set(&Symbol::new(&_env, "released"), &delivery_id);
+            .set(&Symbol::new(&_env, "holdback"), &delivery_id);
     }
 
     pub fn release_escrow(_env: Env, _caller: Address, delivery_id: u64) {
@@ -45,6 +57,10 @@ impl MockEscrowContract {
             .set(&Symbol::new(&_env, "released"), &delivery_id);
     }
 
+    pub fn is_paused(_env: Env) -> bool {
+        false
+    }
+
     pub fn raise_dispute(_env: Env, _caller: Address, delivery_id: u64) {
         if delivery_id == 9999 {
             panic!("MockEscrowFailure");
@@ -54,18 +70,49 @@ impl MockEscrowContract {
             .set(&Symbol::new(&_env, "disputed"), &delivery_id);
     }
 
-    /// Minimal stand-in for get_combined_state's cross-call — always reports
-    /// a Locked escrow, which is the synchronized counterpart for every
-    /// pre-Delivered/Disputed/Cancelled delivery status.
-    pub fn get_escrow(_env: Env, _delivery_id: u64) -> shared_types::EscrowRecord {
+    /// Minimal stand-in for get_combined_state's cross-call. Reflect the
+    /// escrow operation recorded by the mock, while defaulting to Locked for
+    /// pre-Delivered/Disputed/Cancelled delivery states.
+    pub fn get_escrow(_env: Env, delivery_id: u64) -> shared_types::EscrowRecord {
         let placeholder = Address::generate(&_env);
+        let status = if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "holdback"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Holdback
+        } else if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "released"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Released
+        } else if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "refunded"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Refunded
+        } else if _env
+            .storage()
+            .temporary()
+            .get::<_, u64>(&Symbol::new(&_env, "disputed"))
+            == Some(delivery_id)
+        {
+            shared_types::EscrowStatus::Paused
+        } else {
+            shared_types::EscrowStatus::Locked
+        };
         shared_types::EscrowRecord {
             sender: placeholder.clone(),
             recipient: placeholder.clone(),
             driver: placeholder,
             token: Address::generate(&_env),
             amount: 0,
-            status: shared_types::EscrowStatus::Locked,
+            status,
             created_at: _env.ledger().timestamp(),
             expires_at: None,
             disputed_by: None,
@@ -83,6 +130,10 @@ pub struct MockReputationContract;
 
 #[contractimpl]
 impl MockReputationContract {
+    pub fn has_user_profile(_env: Env, _user: Address) -> bool {
+        false
+    }
+
     pub fn register_user(_env: Env, user: Address) -> shared_types::UserProfile {
         _env.storage()
             .temporary()
@@ -138,6 +189,29 @@ fn setup_full(
     (client, shipper, driver, recipient, escrow_id, reputation_id)
 }
 
+fn setup_with_identity(
+    env: &Env,
+) -> (DeliveryContractClient<'static>, Address, Address, Address) {
+    env.mock_all_auths();
+    let escrow_id = env.register(MockEscrowContract, ());
+    let delivery_id = env.register(DeliveryContract, ());
+    let identity_id = env.register(identity_reputation_contract::IdentityReputationContract, ());
+    let client = DeliveryContractClient::new(env, &delivery_id);
+    let admin = Address::generate(env);
+    let recipient = Address::generate(env);
+    let dispute_id = Address::generate(env);
+
+    client.init(&admin, &escrow_id);
+    let identity_client = identity_reputation_contract::IdentityReputationContractClient::new(
+        env,
+        &identity_id,
+    );
+    identity_client.init(&admin, &delivery_id, &dispute_id);
+    client.set_identity_reputation_contract(&admin, &identity_id);
+
+    (client, admin, recipient, identity_id)
+}
+
 fn get_test_metadata(env: &Env, delivery_id: u64) -> DeliveryMetadata {
     use shared_types::{CargoCategory, CargoDescriptor};
     DeliveryMetadata {
@@ -152,6 +226,75 @@ fn get_test_metadata(env: &Env, delivery_id: u64) -> DeliveryMetadata {
         created_at: env.ledger().timestamp(),
         estimated_delivery: env.ledger().timestamp() + 86400,
     }
+}
+
+#[test]
+#[should_panic(expected = "5")] // DeliveryError::InvalidParties
+fn create_delivery_rejects_same_sender_and_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let escrow_id = env.register(MockEscrowContract, ());
+    let contract_id = env.register(DeliveryContract, ());
+    let client = DeliveryContractClient::new(&env, &contract_id);
+    let sender_and_recipient = Address::generate(&env);
+    client.init(&sender_and_recipient, &escrow_id);
+
+    client.create_delivery(
+        &sender_and_recipient,
+        &sender_and_recipient,
+        &get_test_metadata(&env, 1),
+    );
+}
+
+#[test]
+fn create_delivery_and_batch_are_idempotent_for_identity_registration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let identity_id = env.register(identity_reputation_contract::IdentityReputationContract, ());
+    let escrow_id = env.register(MockEscrowContract, ());
+    let contract_id = env.register(DeliveryContract, ());
+    let client = DeliveryContractClient::new(&env, &contract_id);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    client.init(&sender, &escrow_id);
+    client.set_identity_reputation_contract(&sender, &identity_id);
+
+    client.create_delivery(&sender, &recipient, &get_test_metadata(&env, 1));
+    let second_id = client.create_delivery(&sender, &recipient, &get_test_metadata(&env, 2));
+
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 3));
+    let batch_ids = client.create_deliveries_batch(&sender, &recipient, &metadata_list);
+
+    assert_eq!(second_id.value(), 2);
+    assert_eq!(batch_ids.len(), 1);
+}
+
+#[test]
+fn get_driver_profile_reads_identity_reputation_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let identity_id = env.register(identity_reputation_contract::IdentityReputationContract, ());
+    let identity_client =
+        identity_reputation_contract::IdentityReputationContractClient::new(&env, &identity_id);
+    let driver = Address::generate(&env);
+    env.ledger().set_timestamp(100);
+    identity_client.register_driver(&driver);
+
+    env.ledger().set_timestamp(200);
+    let escrow_id = env.register(MockEscrowContract, ());
+    let delivery_id = env.register(DeliveryContract, ());
+    let delivery_client = DeliveryContractClient::new(&env, &delivery_id);
+    let admin = Address::generate(&env);
+    delivery_client.init(&admin, &escrow_id);
+    delivery_client.set_identity_reputation_contract(&admin, &identity_id);
+
+    let profile = delivery_client.get_driver_profile(&driver);
+
+    assert_eq!(profile.address, driver);
+    assert_eq!(profile.reputation_score, 50);
+    assert_eq!(profile.registered_at, 100);
 }
 
 fn get_test_metadata_with_estimate(
@@ -207,6 +350,60 @@ fn test_happy_path_full_lifecycle() {
         was_released, delivery_id,
         "Expected escrow to be released after delivery"
     );
+}
+
+#[test]
+fn test_delivery_secondary_indexes_track_sender_and_recipient() {
+    let env = Env::default();
+    let (client, shipper, _driver, recipient, _escrow_id, _) = setup_full(&env);
+    let other_shipper = Address::generate(&env);
+    let other_recipient = Address::generate(&env);
+
+    let first_id = client.create_delivery(&shipper, &recipient, &get_test_metadata(&env, 1));
+    let second_id = client.create_delivery(&shipper, &other_recipient, &get_test_metadata(&env, 2));
+    let third_id = client.create_delivery(
+        &other_shipper,
+        &recipient,
+        &get_test_metadata(&env, 3),
+    );
+
+    let shipper_deliveries = client.get_deliveries_by_sender(&shipper);
+    assert_eq!(shipper_deliveries.len(), 2);
+    assert_eq!(shipper_deliveries.get(0), Some(first_id));
+    assert_eq!(shipper_deliveries.get(1), Some(second_id));
+
+    let recipient_deliveries = client.get_deliveries_by_recipient(&recipient);
+    assert_eq!(recipient_deliveries.len(), 2);
+    assert_eq!(recipient_deliveries.get(0), Some(first_id));
+    assert_eq!(recipient_deliveries.get(1), Some(third_id));
+
+    assert_eq!(client.get_deliveries_by_sender(&Address::generate(&env)).len(), 0);
+}
+
+#[test]
+fn test_delivery_batch_secondary_indexes_append_ids() {
+    let env = Env::default();
+    let (client, shipper, _driver, recipient, _escrow_id, _) = setup_full(&env);
+
+    let first_id = client.create_delivery(&shipper, &recipient, &get_test_metadata(&env, 1));
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 2));
+    metadata_list.push_back(get_test_metadata(&env, 3));
+
+    let batch_ids = client.create_deliveries_batch(&shipper, &recipient, &metadata_list);
+    assert_eq!(batch_ids.len(), 2);
+
+    let sender_deliveries = client.get_deliveries_by_sender(&shipper);
+    assert_eq!(sender_deliveries.len(), 3);
+    assert_eq!(sender_deliveries.get(0), Some(first_id));
+    assert_eq!(sender_deliveries.get(1), batch_ids.get(0));
+    assert_eq!(sender_deliveries.get(2), batch_ids.get(1));
+
+    let recipient_deliveries = client.get_deliveries_by_recipient(&recipient);
+    assert_eq!(recipient_deliveries.len(), 3);
+    assert_eq!(recipient_deliveries.get(0), Some(first_id));
+    assert_eq!(recipient_deliveries.get(1), batch_ids.get(0));
+    assert_eq!(recipient_deliveries.get(2), batch_ids.get(1));
 }
 
 // ── CANCELLATION PATH ───────────────────────────────────────────────────────
@@ -840,6 +1037,21 @@ fn test_accept_minimum_valid_weight() {
 }
 
 #[test]
+#[should_panic(expected = "2")] // DeliveryError::InvalidMetadata
+fn test_batch_rejects_invalid_metadata() {
+    let env = Env::default();
+    let (client, shipper, _, recipient, _, _) = setup_full(&env);
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 1));
+
+    let mut invalid_metadata = get_test_metadata(&env, 2);
+    invalid_metadata.origin = String::from_str(&env, "");
+    metadata_list.push_back(invalid_metadata);
+
+    client.create_deliveries_batch(&shipper, &recipient, &metadata_list);
+}
+
+#[test]
 fn test_confirm_delivery_calls_increase_reputation() {
     let env = Env::default();
     let (client, shipper, driver, recipient, _, reputation_id) = setup_full(&env);
@@ -1349,6 +1561,41 @@ fn test_create_deliveries_batch_registers_users() {
 }
 
 #[test]
+fn test_create_delivery_allows_existing_identity_profiles() {
+    let env = Env::default();
+    let (client, sender, recipient, identity_id) = setup_with_identity(&env);
+    let metadata = get_test_metadata(&env, 1);
+
+    client.create_delivery(&sender, &recipient, &metadata);
+    client.create_delivery(&sender, &recipient, &metadata);
+
+    let identity_client = identity_reputation_contract::IdentityReputationContractClient::new(
+        &env,
+        &identity_id,
+    );
+    assert_eq!(identity_client.get_user_profile(&sender).address, sender);
+    assert_eq!(identity_client.get_user_profile(&recipient).address, recipient);
+}
+
+#[test]
+fn test_create_deliveries_batch_allows_existing_identity_profiles() {
+    let env = Env::default();
+    let (client, sender, recipient, identity_id) = setup_with_identity(&env);
+    let mut metadata_list = soroban_sdk::Vec::new(&env);
+    metadata_list.push_back(get_test_metadata(&env, 1));
+
+    client.create_deliveries_batch(&sender, &recipient, &metadata_list);
+    client.create_deliveries_batch(&sender, &recipient, &metadata_list);
+
+    let identity_client = identity_reputation_contract::IdentityReputationContractClient::new(
+        &env,
+        &identity_id,
+    );
+    assert_eq!(identity_client.get_user_profile(&sender).address, sender);
+    assert_eq!(identity_client.get_user_profile(&recipient).address, recipient);
+}
+
+#[test]
 #[should_panic(expected = "3")] // DeliveryError::BatchTooLarge
 fn test_create_deliveries_batch_over_limit_rejected() {
     let env = Env::default();
@@ -1448,5 +1695,76 @@ fn test_early_delivery_confirmation() {
     assert!(
         delivery.delivered_at.unwrap_or(0) < estimated_time,
         "Delivery should be early"
+    );
+}
+
+
+/// Test that create_delivery and create_deliveries_batch emit compatible
+/// DeliveryCreatedEvent payloads with the same shape and topic.
+/// This ensures off-chain consumers receive consistent event structure.
+#[test]
+fn test_create_delivery_and_batch_emit_consistent_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let shipper = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let contract_id = env.register(DeliveryContract, ());
+    let client = DeliveryContractClient::new(&env, &contract_id);
+
+    client.init(&Address::generate(&env));
+
+    // Create single delivery via create_delivery
+    let cargo = shared_types::CargoDescriptor {
+        weight_grams: 500,
+        category: shared_types::CargoCategory::Electronics,
+        fragile: true,
+    };
+    let metadata = DeliveryMetadata {
+        delivery_id: 999, // Will be overwritten
+        origin: soroban_sdk::String::from_str(&env, "Origin"),
+        destination: soroban_sdk::String::from_str(&env, "Destination"),
+        cargo_description: cargo,
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 3600,
+    };
+
+    let single_delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    // Create batch with one delivery via create_deliveries_batch
+    let mut batch_metadata = soroban_sdk::vec![&env];
+    let mut meta = metadata.clone();
+    meta.delivery_id = 888; // Will be overwritten
+    batch_metadata.push_back(meta);
+
+    let batch_ids = client.create_deliveries_batch(&shipper, &recipient, &batch_metadata);
+    assert_eq!(batch_ids.len(), 1);
+    let batch_delivery_id = batch_ids.get(0).unwrap();
+
+    // Retrieve both deliveries to verify they have the same structure
+    let single_delivery = client.get_delivery(&single_delivery_id);
+    let batch_delivery = client.get_delivery(&batch_delivery_id);
+
+    // Both should be Pending status
+    assert_eq!(single_delivery.status, DeliveryStatus::Pending);
+    assert_eq!(batch_delivery.status, DeliveryStatus::Pending);
+
+    // Both should have sender as shipper
+    assert_eq!(single_delivery.sender, shipper);
+    assert_eq!(batch_delivery.sender, shipper);
+
+    // Both should have recipient
+    assert_eq!(single_delivery.recipient, recipient);
+    assert_eq!(batch_delivery.recipient, recipient);
+
+    // Both should have same metadata structure
+    assert_eq!(single_delivery.metadata.origin, batch_delivery.metadata.origin);
+    assert_eq!(
+        single_delivery.metadata.destination,
+        batch_delivery.metadata.destination
+    );
+    assert_eq!(
+        single_delivery.metadata.cargo_description.weight_grams,
+        batch_delivery.metadata.cargo_description.weight_grams
     );
 }

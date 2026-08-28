@@ -1,6 +1,15 @@
 use super::*;
+use proptest::prelude::*;
 use shared_types::FaniLabError;
 use soroban_sdk::{testutils::Address as _, Address, Env};
+
+#[rustfmt::skip]
+proptest! {
+    #[test] fn reputation_is_bounded(score in any::<u32>(), points in any::<u32>()) {
+        prop_assert!(reputation_up(score.min(MAX_REPUTATION), points) <= MAX_REPUTATION);
+        prop_assert!(reputation_down(score.min(MAX_REPUTATION), points) <= MAX_REPUTATION);
+    }
+}
 
 fn setup() -> (
     Env,
@@ -33,6 +42,39 @@ fn test_register_driver() {
     assert_eq!(profile.reputation_score, 50);
     assert_eq!(profile.deliveries_completed, 0);
     assert!(!profile.kyc_verified);
+}
+
+#[test]
+fn test_register_user_and_get_profile() {
+    let (env, _, client, _, _) = setup();
+    let user = Address::generate(&env);
+
+    let registered = client.register_user(&user);
+    let profile = client.get_user_profile(&user);
+
+    assert_eq!(registered, profile);
+    assert_eq!(profile.address, user);
+}
+
+#[test]
+fn test_register_user_is_idempotent() {
+    let (env, _, client, _, _) = setup();
+    let user = Address::generate(&env);
+
+    let first = client.register_user(&user);
+    let second = client.register_user(&user);
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn test_has_driver_profile() {
+    let (env, _, client, _, _) = setup();
+    let driver = Address::generate(&env);
+
+    assert!(!client.has_driver_profile(&driver));
+    client.register_driver(&driver);
+    assert!(client.has_driver_profile(&driver));
 }
 
 #[test]
@@ -270,6 +312,14 @@ fn test_set_reputation_config_unauthorized() {
 }
 
 // Cross-contract wiring updates
+
+#[test]
+fn test_init_stores_cross_contract_addresses() {
+    let (env, _, client, delivery_contract, dispute_contract) = setup();
+
+    assert_eq!(client.get_delivery_contract(), delivery_contract);
+    assert_eq!(client.get_dispute_contract(), dispute_contract);
+}
 
 #[test]
 fn test_admin_can_repoint_cross_contracts() {
