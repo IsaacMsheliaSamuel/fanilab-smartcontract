@@ -1309,6 +1309,7 @@ impl EscrowContract {
         // Checks + effects (state) are resolved per-branch first; the actual
         // fund transfer (interaction) happens only after all state below is
         // committed, per checks-effects-interactions.
+        let mut platform_fee: i128 = 0;
         let fleet_management: Option<Address> = if release_to_driver {
             let base_fee_bps: u32 = env
                 .storage()
@@ -1319,8 +1320,7 @@ impl EscrowContract {
 
             let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
             let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
-            let platform_fee = calculate_fee(record.amount, effective_fee_bps);
-            let _driver_amount = record.amount.saturating_sub(platform_fee);
+            platform_fee = calculate_fee(record.amount, effective_fee_bps);
 
             let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
             env.storage()

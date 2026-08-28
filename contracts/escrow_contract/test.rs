@@ -1,10 +1,10 @@
 use super::*;
 use proptest::prelude::*;
-use shared_types::FaniLabError;
+use shared_types::{EscrowReleasedEvent, FaniLabError};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events, Ledger as _},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
+    xdr, Address, Env, TryFromVal, TryIntoVal, Val,
 };
 
 proptest! {
@@ -1708,6 +1708,266 @@ fn test_volume_tier_fee_discount_applied() {
     // here, not the 2nd) — this release still pays the full 1% base fee.
     assert_eq!(balance(&env, &token, &driver), 1980); // 990 + (1000 - 10 fee, no discount yet)
     assert_eq!(client.get_sender_volume(&sender), 2u32);
+
+    // The 3rd release is the first where sender_volume (2) has already
+    // reached the threshold at check time, so this one — and only this
+    // one — must actually be discounted on-chain, not just in the emitted
+    // event.
+    client.create_escrow(&sender, &recipient, &driver, &502u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &502u64);
+    assert_eq!(balance(&env, &token, &driver), 2975); // 1980 + (1000 - 5 discounted fee)
+    assert_eq!(balance(&env, &token, &admin), 10 + 10 + 5); // two full fees + one discounted fee
+    assert_eq!(client.get_sender_volume(&sender), 3u32);
+}
+
+/// Sender past the tier threshold: the discount computed by
+/// `get_effective_fee_bps` must actually reduce the platform fee taken
+/// out of the on-chain transfer, not just the emitted event, via the
+/// `release_escrow` path (Issue #190).
+#[test]
+fn test_release_escrow_applies_volume_discount_past_threshold() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &100); // 1% base fee
+    mint(&env, &token, &sender, 3000);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 1u32,
+        discount_bps: 40u32, // 0.4% discount once sender_volume >= 1
+    });
+    client.set_volume_tiers(&admin, &tiers);
+
+    // First release: sender_volume is 0 at check time, below the threshold,
+    // so the full 1% base fee applies.
+    client.create_escrow(&sender, &recipient, &driver, &510u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &510u64);
+    assert_eq!(balance(&env, &token, &driver), 990);
+    assert_eq!(balance(&env, &token, &admin), 10);
+
+    // Second release: sender_volume is now 1, at/above the threshold, so the
+    // discounted 0.6% effective fee must actually be what moves on-chain.
+    client.create_escrow(&sender, &recipient, &driver, &511u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &511u64);
+    assert_eq!(balance(&env, &token, &driver), 990 + 994); // 1000 - 6 discounted fee
+    assert_eq!(balance(&env, &token, &admin), 10 + 6);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+}
+
+/// Sender below the tier threshold pays the full, undiscounted base fee.
+#[test]
+fn test_release_escrow_no_discount_below_threshold() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &100); // 1% base fee
+    mint(&env, &token, &sender, 1000);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 5u32,
+        discount_bps: 50u32,
+    });
+    client.set_volume_tiers(&admin, &tiers);
+
+    client.create_escrow(&sender, &recipient, &driver, &512u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &512u64);
+
+    assert_eq!(balance(&env, &token, &driver), 990);
+    assert_eq!(balance(&env, &token, &admin), 10);
+}
+
+/// The same tier-based discount must be applied identically via the
+/// `release_holdback_escrow` path, since it also routes through
+/// `settle_escrow_funds`.
+#[test]
+fn test_release_holdback_escrow_applies_volume_discount() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &100); // 1% base fee
+    mint(&env, &token, &sender, 3000);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 1u32,
+        discount_bps: 40u32,
+    });
+    client.set_volume_tiers(&admin, &tiers);
+
+    // First delivery, released via the normal (non-holdback) path, brings
+    // sender_volume to 1 so the second delivery crosses the threshold.
+    client.create_escrow(&sender, &recipient, &driver, &513u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &513u64);
+    assert_eq!(balance(&env, &token, &driver), 990);
+    assert_eq!(balance(&env, &token, &admin), 10);
+
+    client.create_escrow(&sender, &recipient, &driver, &514u64, &token, &1000, &None);
+    client.mark_holdback_escrow(&recipient, &514u64);
+    client.release_holdback_escrow(&recipient, &514u64);
+
+    assert_eq!(balance(&env, &token, &driver), 990 + 994); // 1000 - 6 discounted fee
+    assert_eq!(balance(&env, &token, &admin), 10 + 6);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+}
+
+/// The same tier-based discount must be applied identically via
+/// `resolve_dispute(release_to_driver = true)`, since it also routes
+/// through `settle_escrow_funds`. Prior to the fix this path discarded its
+/// computed fee into `_driver_amount` and settled at the full base fee.
+#[test]
+fn test_resolve_dispute_release_to_driver_applies_volume_discount() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &100); // 1% base fee
+    mint(&env, &token, &sender, 3000);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 1u32,
+        discount_bps: 40u32,
+    });
+    client.set_volume_tiers(&admin, &tiers);
+
+    client.create_escrow(&sender, &recipient, &driver, &515u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &515u64);
+    assert_eq!(balance(&env, &token, &driver), 990);
+    assert_eq!(balance(&env, &token, &admin), 10);
+
+    client.create_escrow(&sender, &recipient, &driver, &516u64, &token, &1000, &None);
+    client.raise_dispute(&sender, &516u64);
+    client.resolve_dispute(&admin, &516u64, &true);
+
+    assert_eq!(balance(&env, &token, &driver), 990 + 994); // 1000 - 6 discounted fee
+    assert_eq!(balance(&env, &token, &admin), 10 + 6);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+    assert_eq!(client.get_escrow(&516u64).status, EscrowStatus::Released);
+}
+
+/// Regression guard: the amounts in the `escrow_released` event must equal
+/// the amounts actually moved on-chain, so indexers/dashboards reading the
+/// event never diverge from the real balances (the original bug in Issue
+/// #190).
+#[test]
+fn test_release_escrow_event_amounts_match_balance_deltas() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &100); // 1% base fee
+    mint(&env, &token, &sender, 3000);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 1u32,
+        discount_bps: 40u32,
+    });
+    client.set_volume_tiers(&admin, &tiers);
+
+    client.create_escrow(&sender, &recipient, &driver, &517u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &517u64);
+
+    client.create_escrow(&sender, &recipient, &driver, &518u64, &token, &1000, &None);
+    let driver_before = balance(&env, &token, &driver);
+    let admin_before = balance(&env, &token, &admin);
+    client.release_escrow(&recipient, &518u64);
+
+    // Capture the event immediately after the call that emits it: the test
+    // harness only surfaces events from the most recent contract invocation,
+    // so any further client calls (even read-only balance queries) would
+    // clear it first.
+    let last_event = last_event(&env);
+    let event: EscrowReleasedEvent = EscrowReleasedEvent::try_from_val(&env, &last_event.2)
+        .expect("failed to decode EscrowReleasedEvent");
+
+    let driver_after = balance(&env, &token, &driver);
+    let admin_after = balance(&env, &token, &admin);
+
+    assert_eq!(event.delivery_id, 518u64);
+    assert_eq!(event.driver, driver);
+    assert_eq!(event.amount, driver_after - driver_before);
+    assert_eq!(event.platform_fee, admin_after - admin_before);
+    // With the tier crossed, this must be a genuinely discounted amount, not
+    // the full base fee.
+    assert_eq!(event.platform_fee, 6);
+    assert_eq!(event.amount, 994);
+}
+
+/// A discount larger than the base fee must not produce a negative fee: the
+/// `saturating_sub` in `get_effective_fee_bps` floors the effective fee at
+/// zero, so the driver receives the full amount and the admin collects
+/// nothing, on-chain as well as in the event.
+#[test]
+fn test_volume_discount_larger_than_base_fee_floors_at_zero() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &50); // 0.5% base fee
+    mint(&env, &token, &sender, 2000);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 1u32,
+        discount_bps: 100u32, // 1% discount, larger than the 0.5% base fee
+    });
+    client.set_volume_tiers(&admin, &tiers);
+
+    client.create_escrow(&sender, &recipient, &driver, &519u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &519u64);
+    assert_eq!(balance(&env, &token, &driver), 995);
+    assert_eq!(balance(&env, &token, &admin), 5);
+
+    client.create_escrow(&sender, &recipient, &driver, &520u64, &token, &1000, &None);
+    client.release_escrow(&recipient, &520u64);
+
+    // Effective fee saturates at 0 instead of going negative, so the driver
+    // gets the full 1000 and the admin gets nothing more.
+    assert_eq!(balance(&env, &token, &driver), 995 + 1000);
+    assert_eq!(balance(&env, &token, &admin), 5);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
 }
 
 #[test]
