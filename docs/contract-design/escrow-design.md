@@ -19,12 +19,22 @@ Locked ──► Released
   │
   ├──► Holdback ──► Released
   │        │
-  │        └──► Paused
+  │        ├──► Paused (via raise_dispute  ← fix #193)
+  │        │
+  │        └──► Paused (via freeze_funds from dispute_resolution_contract)
   │
   └──► Paused ──► Released
               ├──► Refunded
               └──► Split
 ```
+
+> **Issue #193 (fixed):** `raise_dispute` now accepts both `Locked` and
+> `Holdback` as starting states. Before this fix only `Locked` was accepted,
+> which made the entire post-delivery dispute window unreachable: after
+> `confirm_delivery` the escrow is in `Holdback`, so every attempt to raise a
+> dispute produced `InvalidState`. The `Holdback → Paused` transition via
+> `raise_dispute` is now permitted alongside the existing path via
+> `freeze_funds` (called by `dispute_resolution_contract`).
 
 | State       | Meaning                                                          |
 |-------------|------------------------------------------------------------------|
@@ -129,7 +139,7 @@ Emits an `escrow_refunded` event.
 Allows anyone to reclaim an escrow that has passed its `expires_at` timestamp. Funds are returned to the sender. This prevents funds from being locked indefinitely.
 
 ### `freeze_funds(env, caller, delivery_id)`
-Called exclusively by the **dispute resolution contract** to pause an escrow when a dispute is raised. Transitions status from `Locked` to `Paused`. Emits a `funds_frozen` event.
+Called exclusively by the **dispute resolution contract** to pause an escrow when a dispute is raised. Transitions status from `Locked` or `Holdback` to `Paused`. If the escrow is already `Paused` the call is a safe no-op. Emits a `funds_frozen` event.
 
 ### `unfreeze_funds(env, caller, delivery_id)`
 Called by the dispute resolution contract to return a paused escrow back to `Locked` status when a dispute is resolved in favor of continuing the delivery.
