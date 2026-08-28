@@ -35,6 +35,10 @@ pub enum DriverTier {
 }
 
 const MAX_REPUTATION: u32 = 100;
+#[rustfmt::skip]
+fn reputation_up(score: u32, points: u32) -> u32 { score.saturating_add(points).min(MAX_REPUTATION) }
+#[rustfmt::skip]
+fn reputation_down(score: u32, points: u32) -> u32 { score.saturating_sub(points) }
 const GOLD_TIER_THRESHOLD: u32 = 75;
 // Enterprise eligibility is intentionally tied to reaching the Gold tier.
 const ENTERPRISE_THRESHOLD: u32 = GOLD_TIER_THRESHOLD;
@@ -302,7 +306,7 @@ impl IdentityReputationContract {
             points += config.fragile_points;
         }
 
-        profile.reputation_score = (profile.reputation_score + points).min(MAX_REPUTATION);
+        profile.reputation_score = reputation_up(profile.reputation_score, points);
         profile.deliveries_completed += 1;
 
         env.storage().persistent().set(&key, &profile);
@@ -336,7 +340,7 @@ impl IdentityReputationContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
 
-        profile.reputation_score = profile.reputation_score.saturating_sub(points);
+        profile.reputation_score = reputation_down(profile.reputation_score, points);
 
         env.storage().persistent().set(&key, &profile);
         env.storage().persistent().extend_ttl(

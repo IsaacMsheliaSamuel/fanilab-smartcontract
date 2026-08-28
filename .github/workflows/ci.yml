@@ -31,10 +31,18 @@ jobs:
       run: cargo fmt --all -- --check
 
     - name: Run Clippy (Linter)
-      run: cargo clippy --locked --all-targets --all-features --target wasm32v1-none -- -D warnings
+      run: cargo clippy --locked --all-targets --all-features --target wasm32v1-none -- -D warnings && cargo clippy --locked --workspace --all-targets -- -D warnings
 
     - name: Build Contracts (WASM)
       run: cargo build --locked --target wasm32v1-none --release
+
+    - name: Enforce WASM size budgets
+      run: |
+        while read name limit; do
+          file="target/wasm32v1-none/release/$name.wasm"
+          size=$(wc -c < "$file"); echo "$name: $size / $limit bytes"
+          test "$size" -le "$limit" || exit 1
+        done < .github/wasm-size-budgets.txt
 
     - name: Run Tests
       run: cargo test --locked --verbose
@@ -84,4 +92,3 @@ jobs:
           exit 1
         fi
         echo "✅ No legacy wasm target references found in scripts/, Makefile, Makefile.windows, or .vscode/."
-

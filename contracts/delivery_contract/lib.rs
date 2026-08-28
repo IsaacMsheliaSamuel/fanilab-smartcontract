@@ -20,11 +20,37 @@ pub const MAX_BATCH_SIZE: u32 = 100;
 pub enum DataKey {
     DeliveryCounter,
     EscrowContract,
-    /// Secondary index: deliveries created by sender (Vec<DeliveryId>).
-    DeliveriesBySender(Address),
-    /// Secondary index: deliveries with recipient (Vec<DeliveryId>).
-    DeliveriesByRecipient(Address),
+    DeliveryIndex(Address, u32, u32),
+    DeliveryIndexLen(Address, u32),
     IdentityReputationContract,
+}
+
+const INDEX_PAGE: u32 = 64;
+#[rustfmt::skip]
+fn index_push(env: &Env, owner: &Address, kind: u32, id: DeliveryId) {
+    let len_key = DataKey::DeliveryIndexLen(owner.clone(), kind);
+    let len: u32 = env.storage().persistent().get(&len_key).unwrap_or(0);
+    let key = DataKey::DeliveryIndex(owner.clone(), kind, len / INDEX_PAGE);
+    let mut page: soroban_sdk::Vec<DeliveryId> = env.storage().persistent().get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    page.push_back(id);
+    env.storage().persistent().set(&key, &page);
+    env.storage().persistent().set(&len_key, &(len + 1));
+}
+
+#[rustfmt::skip]
+fn index_page(env: &Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<DeliveryId> {
+    let len: u32 = env.storage().persistent()
+        .get(&DataKey::DeliveryIndexLen(owner.clone(), kind)).unwrap_or(0);
+    let mut out = soroban_sdk::Vec::new(env);
+    let end = len.min(offset.saturating_add(limit.min(100)));
+    for i in offset.min(len)..end {
+        let page: soroban_sdk::Vec<DeliveryId> = env.storage().persistent()
+            .get(&DataKey::DeliveryIndex(owner.clone(), kind, i / INDEX_PAGE))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if let Some(id) = page.get(i % INDEX_PAGE) { out.push_back(id); }
+    }
+    out
 }
 
 #[contracterror]
@@ -214,7 +240,9 @@ impl DeliveryContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        // Update secondary indexes.
+        index_push(&env, &sender, 0, delivery_id);
+        index_push(&env, &recipient, 1, delivery_id);
+        /* Legacy indexes.
         let sender_key = DataKey::DeliveriesBySender(sender.clone());
         let mut sender_deliveries: soroban_sdk::Vec<DeliveryId> = env
             .storage()
@@ -246,6 +274,7 @@ impl DeliveryContract {
             ttl::LEDGER_TTL_THRESHOLD,
             ttl::LEDGER_TTL_EXTEND_TO,
         );
+        */
 
         env.events().publish(
             (events::delivery_created(&env),),
@@ -298,13 +327,14 @@ impl DeliveryContract {
 
         let timestamp = env.ledger().timestamp();
 
-        // Pre-load sender and recipient indexes for efficient batch updates.
+        /* Legacy index batching.
         let sender_key = DataKey::DeliveriesBySender(sender.clone());
         let mut sender_deliveries: soroban_sdk::Vec<DeliveryId> = env
             .storage()
             .persistent()
             .get(&sender_key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        */
 
         let recipient_key = DataKey::DeliveriesByRecipient(recipient.clone());
         let mut recipient_deliveries: soroban_sdk::Vec<DeliveryId> = env
@@ -345,8 +375,8 @@ impl DeliveryContract {
                     ttl::LEDGER_TTL_EXTEND_TO,
                 );
 
-                sender_deliveries.push_back(delivery_id);
-                recipient_deliveries.push_back(delivery_id);
+                index_push(&env, &sender, 0, delivery_id);
+                index_push(&env, &recipient, 1, delivery_id);
 
                 env.events().publish(
                     (soroban_sdk::Symbol::new(&env, "delivery_created"),),
@@ -357,7 +387,7 @@ impl DeliveryContract {
             }
         }
 
-        // Save updated indexes.
+        /* Legacy index flush.
         env.storage()
             .persistent()
             .set(&sender_key, &sender_deliveries);
@@ -375,6 +405,7 @@ impl DeliveryContract {
             ttl::LEDGER_TTL_THRESHOLD,
             ttl::LEDGER_TTL_EXTEND_TO,
         );
+        */
 
         result
     }
@@ -770,11 +801,7 @@ impl DeliveryContract {
 
     /// Get all delivery IDs created by a sender.
     pub fn get_deliveries_by_sender(env: Env, sender: Address) -> soroban_sdk::Vec<DeliveryId> {
-        let key = DataKey::DeliveriesBySender(sender);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, sender, 0, 0, 100)
     }
 
     /// Get all delivery IDs with a specific recipient.
@@ -782,11 +809,12 @@ impl DeliveryContract {
         env: Env,
         recipient: Address,
     ) -> soroban_sdk::Vec<DeliveryId> {
-        let key = DataKey::DeliveriesByRecipient(recipient);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, recipient, 1, 0, 100)
+    }
+
+    #[rustfmt::skip]
+    pub fn get_deliveries_page(env: Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<DeliveryId> {
+        index_page(&env, owner, kind, offset, limit)
     }
 }
 

@@ -209,12 +209,8 @@ enum DataKey {
     PendingAdmin,
     SettlementContract,
     PendingSettlementContract,
-    /// Secondary index: escrows by sender (Vec<u64> delivery IDs).
-    EscrowsBySender(Address),
-    /// Secondary index: escrows by recipient (Vec<u64> delivery IDs).
-    EscrowsByRecipient(Address),
-    /// Secondary index: escrows by driver (Vec<u64> delivery IDs).
-    EscrowsByDriver(Address),
+    EscrowIndex(Address, u32, u32),
+    EscrowIndexLen(Address, u32),
     Paused,
     FleetManagementContract,
     DisputeResolutionContract,
@@ -224,6 +220,34 @@ enum DataKey {
     SenderVolume(Address),
     /// Store tier configuration (volume threshold -> discount bps)
     VolumeTiers,
+}
+
+const INDEX_PAGE: u32 = 64;
+#[rustfmt::skip]
+fn index_push(env: &Env, owner: &Address, kind: u32, id: u64) {
+    let len_key = DataKey::EscrowIndexLen(owner.clone(), kind);
+    let len: u32 = env.storage().persistent().get(&len_key).unwrap_or(0);
+    let key = DataKey::EscrowIndex(owner.clone(), kind, len / INDEX_PAGE);
+    let mut page: soroban_sdk::Vec<u64> = env.storage().persistent().get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    page.push_back(id);
+    env.storage().persistent().set(&key, &page);
+    env.storage().persistent().set(&len_key, &(len + 1));
+}
+
+#[rustfmt::skip]
+fn index_page(env: &Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<u64> {
+    let len: u32 = env.storage().persistent()
+        .get(&DataKey::EscrowIndexLen(owner.clone(), kind)).unwrap_or(0);
+    let mut out = soroban_sdk::Vec::new(env);
+    let end = len.min(offset.saturating_add(limit.min(100)));
+    for i in offset.min(len)..end {
+        let page: soroban_sdk::Vec<u64> = env.storage().persistent()
+            .get(&DataKey::EscrowIndex(owner.clone(), kind, i / INDEX_PAGE))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if let Some(id) = page.get(i % INDEX_PAGE) { out.push_back(id); }
+    }
+    out
 }
 
 #[contracterror]
@@ -634,7 +658,10 @@ impl EscrowContract {
             },
         );
 
-        // Update secondary indexes.
+        index_push(&env, &sender, 0, delivery_id);
+        index_push(&env, &recipient, 1, delivery_id);
+        index_push(&env, &driver, 2, delivery_id);
+        /* Legacy indexes retained for pre-mainnet compatibility.
         let sender_key = DataKey::EscrowsBySender(sender.clone());
         let mut sender_escrows: soroban_sdk::Vec<u64> = env
             .storage()
@@ -678,6 +705,7 @@ impl EscrowContract {
             ttl::LEDGER_TTL_THRESHOLD,
             ttl::LEDGER_TTL_EXTEND_TO,
         );
+        */
 
         let token_for_tracking = record_token_clone.clone();
         let total_locked_key = DataKey::TotalLocked(token_for_tracking.clone());
@@ -719,7 +747,7 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
 
-        // Pre-load indexes for efficient batch updates.
+        /* Legacy index batching (replaced by bounded pages).
         let sender_key = DataKey::EscrowsBySender(sender.clone());
         let mut sender_escrows: soroban_sdk::Vec<u64> = env
             .storage()
@@ -736,6 +764,7 @@ impl EscrowContract {
 
         let mut driver_indexes: soroban_sdk::Map<DataKey, soroban_sdk::Vec<u64>> =
             soroban_sdk::Map::new(&env);
+        */
 
         let mut count = 0u32;
         for i in 0..escrow_list.len() {
@@ -768,10 +797,15 @@ impl EscrowContract {
                         fleet_id: None,
                     },
                 );
+                /*
                 sender_escrows.push_back(delivery_id);
                 recipient_escrows.push_back(delivery_id);
+                */
+                index_push(&env, &sender, 0, delivery_id);
+                index_push(&env, &recipient, 1, delivery_id);
+                index_push(&env, &driver, 2, delivery_id);
 
-                // Track drivers separately for efficient index updates.
+                /* Legacy driver index.
                 let driver_key = DataKey::EscrowsByDriver(driver.clone());
                 if !driver_indexes.contains_key(driver_key.clone()) {
                     let existing: soroban_sdk::Vec<u64> = env
@@ -785,6 +819,7 @@ impl EscrowContract {
                     driver_escrows_vec.push_back(delivery_id);
                     driver_indexes.set(driver_key, driver_escrows_vec);
                 }
+                */
 
                 env.events().publish(
                     (events::escrow_funded(&env), delivery_id),
@@ -794,7 +829,7 @@ impl EscrowContract {
             }
         }
 
-        // Save all updated indexes.
+        /* Legacy index flush.
         env.storage().persistent().set(&sender_key, &sender_escrows);
         env.storage().persistent().extend_ttl(
             &sender_key,
@@ -821,6 +856,7 @@ impl EscrowContract {
                 ttl::LEDGER_TTL_EXTEND_TO,
             );
         }
+        */
 
         count
     }
@@ -1302,29 +1338,22 @@ impl EscrowContract {
 
     /// Get all escrow delivery IDs for a sender.
     pub fn get_escrows_by_sender(env: Env, sender: Address) -> soroban_sdk::Vec<u64> {
-        let key = DataKey::EscrowsBySender(sender);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, sender, 0, 0, 100)
     }
 
     /// Get all escrow delivery IDs for a recipient.
     pub fn get_escrows_by_recipient(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
-        let key = DataKey::EscrowsByRecipient(recipient);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, recipient, 1, 0, 100)
     }
 
     /// Get all escrow delivery IDs for a driver.
     pub fn get_escrows_by_driver(env: Env, driver: Address) -> soroban_sdk::Vec<u64> {
-        let key = DataKey::EscrowsByDriver(driver);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, driver, 2, 0, 100)
+    }
+
+    #[rustfmt::skip]
+    pub fn get_escrows_page(env: Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<u64> {
+        index_page(&env, owner, kind, offset, limit)
     }
 
     pub fn get_total_locked(env: Env, token: Address) -> i128 {
