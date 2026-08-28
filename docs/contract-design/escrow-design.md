@@ -19,12 +19,22 @@ Locked ──► Released
   │
   ├──► Holdback ──► Released
   │        │
-  │        └──► Paused
+  │        ├──► Paused (via raise_dispute  ← fix #193)
+  │        │
+  │        └──► Paused (via freeze_funds from dispute_resolution_contract)
   │
   └──► Paused ──► Released
               ├──► Refunded
               └──► Split
 ```
+
+> **Issue #193 (fixed):** `raise_dispute` now accepts both `Locked` and
+> `Holdback` as starting states. Before this fix only `Locked` was accepted,
+> which made the entire post-delivery dispute window unreachable: after
+> `confirm_delivery` the escrow is in `Holdback`, so every attempt to raise a
+> dispute produced `InvalidState`. The `Holdback → Paused` transition via
+> `raise_dispute` is now permitted alongside the existing path via
+> `freeze_funds` (called by `dispute_resolution_contract`).
 
 | State       | Meaning                                                          |
 |-------------|------------------------------------------------------------------|
@@ -65,16 +75,17 @@ resolved by an admin.
 
 ```rust
 pub struct EscrowRecord {
-    pub delivery_id: u64,
     pub sender: Address,
     pub recipient: Address,
     pub driver: Address,
     pub token: Address,         // The Stellar asset contract address
     pub amount: i128,
-    pub platform_fee: i128,     // Fee deducted on release
-    pub status: EscrowStatus,
+    pub status: EscrowState,
+    pub created_at: u64,
     pub expires_at: Option<u64>,
+    pub disputed_by: Option<Address>,
     pub disputed_at: Option<u64>,
+  pub fleet_id: Option<u64>,
 }
 ```
 
@@ -82,28 +93,31 @@ pub struct EscrowRecord {
 
 ## Key Functions
 
-### `init(env, admin, token, platform_fee_bps, dispute_contract)`
+### `init(env, admin, token, platform_fee_bps)`
 Initializes the escrow contract with:
 - An admin address (protocol governance)
 - The supported token contract address
 - A platform fee rate in basis points (e.g., 50 = 0.5%)
-- The dispute resolution contract address (for freeze/unfreeze calls)
 
 Reverts with `AlreadyInitialized` if called more than once.
 
-### `fund_escrow(env, sender, delivery_id, recipient, driver, amount, expires_at)`
-The sender locks funds into escrow for a specific delivery. This function:
-1. Transfers `amount + platform_fee` from sender to the contract
-2. Creates an `EscrowRecord` with status `Locked`
-3. Returns any excess XLM sent back to the sender
-4. Emits an `escrow_funded` event
+### `set_dispute_resolution_contract(env, admin, dispute_contract)`
+Admin-only function that configures the dispute resolution contract address used
+to authorize `freeze_funds`.
 
-Reverts with `InsufficientFunds` or `Unauthorized` if the caller doesn't match the sender.
+### `create_escrow(env, sender, recipient, driver, delivery_id, token, amount, fleet_id)`
+The sender locks funds into escrow for a specific delivery. This function:
+1. Transfers `amount` of the configured token from sender to the contract
+2. Creates an `EscrowRecord` with status `Locked`
+3. Sets `created_at` to the current ledger timestamp and `expires_at` to the default expiry
+4. Stores the optional `fleet_id`
+5. Emits an `escrow_funded` event
+
+The sender must authorize the call. The supplied token must match the configured
+protocol token, and the amount must be positive.
 
 ### `release_escrow(env, caller, delivery_id)`
-Releases locked funds to the driver. Authorized callers:
-- The **delivery contract** (when delivery is confirmed)
-- The **dispute resolution contract** (when a dispute is resolved in the driver's favor)
+Releases a `Locked` escrow. The recipient or admin must authorize the call.
 
 Before payout, the function:
 1. Checks if a `fleet_management_contract` is configured and queries the fleet's payout address (redirecting funds to the fleet treasury instead of the individual driver)
@@ -129,10 +143,7 @@ Emits an `escrow_refunded` event.
 Allows anyone to reclaim an escrow that has passed its `expires_at` timestamp. Funds are returned to the sender. This prevents funds from being locked indefinitely.
 
 ### `freeze_funds(env, caller, delivery_id)`
-Called exclusively by the **dispute resolution contract** to pause an escrow when a dispute is raised. Transitions status from `Locked` to `Paused`. Emits a `funds_frozen` event.
-
-### `unfreeze_funds(env, caller, delivery_id)`
-Called by the dispute resolution contract to return a paused escrow back to `Locked` status when a dispute is resolved in favor of continuing the delivery.
+Called exclusively by the **dispute resolution contract** to pause an escrow when a dispute is raised. Transitions status from `Locked` or `Holdback` to `Paused`. If the escrow is already `Paused` the call is a safe no-op. Emits a `funds_frozen` event.
 
 ### `update_platform_fee(env, admin, new_fee_bps)`
 Admin-only function to update the platform fee rate. The new fee must not exceed `MAX_PLATFORM_FEE_BPS` (1000 bps = 10%).
@@ -171,7 +182,9 @@ When a fleet management contract is configured, the escrow contract queries `get
 When a settlement contract is configured, the escrow contract queries `get_driver_preference(driver)` before payout. If the driver prefers a different asset, the settlement contract performs a currency swap via Soroban AMM before the final transfer.
 
 ### Dispute Resolution Integration
-The dispute resolution contract is authorized to call `freeze_funds` and `unfreeze_funds` on the escrow contract, as well as `release_escrow` and `refund_escrow` when a dispute is resolved.
+The configured dispute resolution contract is authorized to call `freeze_funds`.
+Dispute outcomes are resolved by the escrow admin through `resolve_dispute` or
+`resolve_dispute_split`; the contract has no `unfreeze_funds` entry point.
 
 ---
 
@@ -179,9 +192,9 @@ The dispute resolution contract is authorized to call `freeze_funds` and `unfree
 
 | Topic                  | Emitted By               | Payload                              |
 |------------------------|--------------------------|--------------------------------------|
-| `escrow_funded`        | `fund_escrow`            | `(sender, amount, platform_fee)`     |
-| `escrow_released`      | `release_escrow`         | `(driver, amount, platform_fee)`     |
-| `escrow_refunded`      | `refund_escrow`          | `(sender, amount)`                   |
+| `escrow_funded`        | `create_escrow`          | `EscrowFundedEvent { delivery_id, sender, token, amount }` |
+| `escrow_released`      | `release_escrow`         | `EscrowReleasedEvent { delivery_id, driver, amount, platform_fee }` |
+| `escrow_refunded`      | `refund_escrow`          | `EscrowRefundedEvent { delivery_id, sender, amount }` |
 | `funds_frozen`         | `freeze_funds`           | `(caller, timestamp)`                |
 | `platform_fee_updated` | `update_platform_fee`    | `(new_fee_bps)`                      |
 

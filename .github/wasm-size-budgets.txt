@@ -1,0 +1,6 @@
+delivery_contract 100000
+dispute_resolution_contract 100000
+escrow_contract 100000
+fleet_management_contract 100000
+identity_reputation_contract 100000
+settlement_contract 100000
