@@ -1,6 +1,15 @@
 use super::*;
+use proptest::prelude::*;
 use shared_types::FaniLabError;
 use soroban_sdk::{testutils::Address as _, Address, Env};
+
+#[rustfmt::skip]
+proptest! {
+    #[test] fn reputation_is_bounded(score in any::<u32>(), points in any::<u32>()) {
+        prop_assert!(reputation_up(score.min(MAX_REPUTATION), points) <= MAX_REPUTATION);
+        prop_assert!(reputation_down(score.min(MAX_REPUTATION), points) <= MAX_REPUTATION);
+    }
+}
 
 fn setup() -> (
     Env,
