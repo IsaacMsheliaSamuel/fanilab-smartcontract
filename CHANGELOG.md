@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **BREAKING (wire format):** `escrow_refunded` and `escrow_released` event topics now have a single, uniform payload shape across all emitters (`escrow_contract`).
+  - `reclaim_expired_escrow` previously emitted `(events::escrow_refunded(&env), delivery_id)` as the topic tuple with a bare `(sender, amount)` payload. It now emits `(events::escrow_refunded(&env),)` with a typed `EscrowRefundedEvent { delivery_id, sender, amount }` payload, matching `refund_escrow`.
+  - `release_holdback_escrow` previously emitted `(events::escrow_released(&env), delivery_id)` as the topic tuple with a bare `(driver, driver_amount, platform_fee)` payload. It now emits `(events::escrow_released(&env),)` with a typed `EscrowReleasedEvent { delivery_id, driver, amount, platform_fee }` payload, matching `release_escrow`.
+  - Off-chain consumers subscribing to these topics must update their decoders to use the typed struct form. The `delivery_id` field is now in the payload rather than the topic. No information is lost — `EscrowReleasedEvent` and `EscrowRefundedEvent` already carried all relevant fields. (Fixes #287.)
+
 ### Added
 - Production-ready CI/CD pipeline with security audits
 - CI: coverage upload now fails the build on error (`fail_ci_if_error: true`)

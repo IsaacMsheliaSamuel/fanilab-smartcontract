@@ -1095,8 +1095,13 @@ impl EscrowContract {
             .set(&total_locked_key, &current_total.saturating_sub(record.amount));
 
         env.events().publish(
-            (events::escrow_released(&env), delivery_id),
-            (record.driver, driver_amount, platform_fee),
+            (events::escrow_released(&env),),
+            shared_types::EscrowReleasedEvent {
+                delivery_id,
+                driver: record.driver,
+                amount: driver_amount,
+                platform_fee,
+            },
         );
     }
 
@@ -1168,8 +1173,12 @@ impl EscrowContract {
             .set(&total_locked_key, &current_total.saturating_sub(record.amount));
 
         env.events().publish(
-            (events::escrow_refunded(&env), delivery_id),
-            (record.sender, record.amount),
+            (events::escrow_refunded(&env),),
+            shared_types::EscrowRefundedEvent {
+                delivery_id,
+                sender: record.sender,
+                amount: record.amount,
+            },
         );
     }
 
