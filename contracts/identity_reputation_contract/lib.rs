@@ -23,6 +23,7 @@ pub enum DataKey {
     AuthorizedContract(Address),
     DeliveryContract,
     DisputeContract,
+    EscrowContract,
     ReputationConfig,
 }
 
@@ -35,6 +36,10 @@ pub enum DriverTier {
 }
 
 const MAX_REPUTATION: u32 = 100;
+#[rustfmt::skip]
+fn reputation_up(score: u32, points: u32) -> u32 { score.saturating_add(points).min(MAX_REPUTATION) }
+#[rustfmt::skip]
+fn reputation_down(score: u32, points: u32) -> u32 { score.saturating_sub(points) }
 const GOLD_TIER_THRESHOLD: u32 = 75;
 // Enterprise eligibility is intentionally tied to reaching the Gold tier.
 const ENTERPRISE_THRESHOLD: u32 = GOLD_TIER_THRESHOLD;
@@ -42,6 +47,27 @@ const HEAVY_CARGO_GRAMS: u32 = 5000;
 const DEFAULT_BASE_POINTS: u32 = 5;
 const DEFAULT_HEAVY_CARGO_POINTS: u32 = 3;
 const DEFAULT_FRAGILE_POINTS: u32 = 2;
+
+fn require_escrow_not_paused(env: &Env) {
+    let delivery_contract: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::DeliveryContract)
+        .unwrap_or_else(|| panic_with_error!(env, FaniLabError::NotInitialized));
+    let escrow_contract: Address = env.invoke_contract(
+        &delivery_contract,
+        &soroban_sdk::Symbol::new(env, "get_escrow_contract"),
+        soroban_sdk::vec![env],
+    );
+    let paused: bool = env.invoke_contract(
+        &escrow_contract,
+        &soroban_sdk::Symbol::new(env, "is_paused"),
+        soroban_sdk::vec![env],
+    );
+    if paused {
+        panic_with_error!(env, FaniLabError::ProtocolPaused);
+    }
+}
 
 #[contract]
 pub struct IdentityReputationContract;
@@ -184,6 +210,7 @@ impl IdentityReputationContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn register_driver(env: Env, driver: Address) {
         driver.require_auth();
+        require_escrow_not_paused(&env);
         let key = DataKey::DriverProfile(driver.clone());
         if env.storage().persistent().has(&key) {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
@@ -213,6 +240,7 @@ impl IdentityReputationContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn register_user(env: Env, user: Address) -> UserProfile {
         user.require_auth();
+        require_escrow_not_paused(&env);
 
         let registered_at = env.ledger().timestamp();
 
@@ -264,6 +292,7 @@ impl IdentityReputationContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn update_driver_kyc_status(env: Env, admin: Address, driver: Address, kyc_verified: bool) {
         admin.require_auth();
+        require_escrow_not_paused(&env);
 
         if !is_admin(&env, &admin) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
@@ -303,6 +332,7 @@ impl IdentityReputationContract {
         weight_grams: u32,
         fragile: bool,
     ) {
+        require_escrow_not_paused(&env);
         if !Self::is_authorized_contract(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -325,7 +355,7 @@ impl IdentityReputationContract {
             points += config.fragile_points;
         }
 
-        profile.reputation_score = (profile.reputation_score + points).min(MAX_REPUTATION);
+        profile.reputation_score = reputation_up(profile.reputation_score, points);
         profile.deliveries_completed += 1;
 
         env.storage().persistent().set(&key, &profile);
@@ -347,6 +377,7 @@ impl IdentityReputationContract {
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn decrease_reputation(env: Env, caller: Address, driver: Address, points: u32) {
+        require_escrow_not_paused(&env);
         if !Self::is_authorized_contract(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -359,7 +390,7 @@ impl IdentityReputationContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
 
-        profile.reputation_score = profile.reputation_score.saturating_sub(points);
+        profile.reputation_score = reputation_down(profile.reputation_score, points);
 
         env.storage().persistent().set(&key, &profile);
         env.storage().persistent().extend_ttl(

@@ -22,19 +22,21 @@ pub const MAX_ROSTER_SIZE: u32 = 10000;
 /// their future payouts are redirected (Issue #70).
 pub const TREASURY_CHANGE_TIMELOCK_SECONDS: u64 = 3 * 24 * 60 * 60; // 3 days
 
-fn require_signer_threshold(env: &Env, profile: &FleetProfile, caller: &Address) {
-    let mut authorized_signer_count = 0u32;
-    for i in 0..profile.signers.len() {
-        if let Some(signer) = profile.signers.get(i) {
-            if signer == *caller {
-                authorized_signer_count += 1;
-                break;
-            }
-        }
-    }
-
-    if authorized_signer_count < profile.signature_threshold {
-        panic_with_error!(env, FleetError::Unauthorized);
+fn require_escrow_not_paused(env: &Env) {
+    let Some(escrow_contract) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::EscrowContract)
+    else {
+        return;
+    };
+    let paused: bool = env.invoke_contract(
+        &escrow_contract,
+        &Symbol::new(env, "is_paused"),
+        soroban_sdk::vec![env],
+    );
+    if paused {
+        panic_with_error!(env, shared_types::FaniLabError::ProtocolPaused);
     }
 }
 
@@ -97,6 +99,8 @@ pub struct PendingTreasuryChange {
 pub enum DataKey {
     /// Instance key — optional address of the identity_reputation_contract.
     IdentityContract,
+    /// Instance key — address of the escrow contract used for pause checks.
+    EscrowContract,
     /// Persistent key — monotonically incrementing fleet counter.
     FleetCounter,
     /// Persistent key — fleet profile keyed by fleet id.
@@ -142,6 +146,16 @@ impl FleetManagementContract {
             .set(&DataKey::IdentityContract, &identity_contract);
     }
 
+    pub fn set_escrow_contract(env: Env, admin: Address, escrow_contract: Address) {
+        admin.require_auth();
+        if !is_admin(&env, &admin) {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::EscrowContract, &escrow_contract);
+    }
+
     // ── Issue #67 — register_fleet ────────────────────────────────────────────
 
     /// Register a new fleet, designating an owner and a treasury wallet.
@@ -152,6 +166,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn register_fleet(env: Env, owner: Address, treasury: Address) -> FleetId {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         // Bump and persist the fleet counter.
         let counter_key = DataKey::FleetCounter;
@@ -242,6 +257,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn deactivate_fleet(env: Env, caller: Address, fleet_id: FleetId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let fleet_key = DataKey::Fleet(fleet_id);
         let mut profile: FleetProfile = env
@@ -408,6 +424,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn update_fleet_treasury(env: Env, owner: Address, fleet_id: FleetId, treasury: Address) {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         let profile: FleetProfile = env
             .storage()
@@ -453,6 +470,7 @@ impl FleetManagementContract {
     /// finalization pattern.
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn confirm_fleet_treasury_update(env: Env, fleet_id: FleetId) {
+        require_escrow_not_paused(&env);
         let pending_key = DataKey::PendingTreasury(fleet_id);
         let pending: PendingTreasuryChange = env
             .storage()
@@ -513,6 +531,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn add_driver_to_fleet(env: Env, caller: Address, fleet_id: FleetId, driver: Address) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let profile: FleetProfile = env
             .storage()
@@ -573,6 +592,7 @@ impl FleetManagementContract {
     /// accepted, clearing the slot so the driver can be re-invited immediately.
     pub fn cancel_invite(env: Env, owner: Address, fleet_id: FleetId, driver: Address) {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         let profile: FleetProfile = env
             .storage()
@@ -605,6 +625,7 @@ impl FleetManagementContract {
     pub fn accept_fleet_invite(env: Env, fleet_id: FleetId, driver: Address) {
         // Driver must authorise.
         driver.require_auth();
+        require_escrow_not_paused(&env);
 
         // Verify the fleet exists.
         let mut profile: FleetProfile = env
@@ -707,6 +728,7 @@ impl FleetManagementContract {
 
         // The caller must sign this transaction.
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         // Verify caller is authorised: must be either an authorized signer or the driver.
         let is_driver = caller == driver;
@@ -837,6 +859,7 @@ impl FleetManagementContract {
         threshold: u32,
     ) {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         let mut profile: FleetProfile = env
             .storage()

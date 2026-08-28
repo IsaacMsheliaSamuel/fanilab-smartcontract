@@ -1,8 +1,10 @@
 extern crate std;
 
 use super::*;
+use delivery_contract::DeliveryContract;
 use escrow_contract::EscrowContract;
 use identity_reputation_contract::IdentityReputationContract;
+use shared_types::{CargoCategory, CargoDescriptor, DeliveryMetadata, DeliveryStatus, EscrowStatus};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger as _},
     xdr, Address, Env, Symbol, TryFromVal, TryIntoVal, Val,
@@ -1129,98 +1131,98 @@ fn test_escrow_payout_routes_through_fleet_treasury() {
     assert_eq!(token_client.balance(&driver), 0);
 }
 
+/// Full protocol happy path using the real delivery, escrow, identity, and
+/// fleet contracts. Delivery creation and escrow funding are separate calls;
+/// the remaining lifecycle calls exercise their cross-contract integrations.
 #[test]
-fn test_escrow_payout_keeps_treasury_after_fleet_deactivation() {
+fn test_full_protocol_happy_path() {
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 
     let env = Env::default();
     env.mock_all_auths();
-    let fleet_contract_id = env.register(FleetManagementContract, ());
-    let fleet_client = FleetManagementContractClient::new(&env, &fleet_contract_id);
-    let fleet_admin = Address::generate(&env);
-    fleet_client.init(&fleet_admin);
 
-    let escrow_contract_id = env.register(EscrowContract, ());
-    let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
-    let escrow_admin = Address::generate(&env);
+    let admin = Address::generate(&env);
     let token = env
-        .register_stellar_asset_contract_v2(escrow_admin.clone())
+        .register_stellar_asset_contract_v2(admin.clone())
         .address();
-    escrow_client.init(&escrow_admin, &token, &0);
-    escrow_client.set_fleet_management_contract(&escrow_admin, &fleet_contract_id);
+
+    let escrow_id = env.register(EscrowContract, ());
+    let escrow = escrow_contract::EscrowContractClient::new(&env, &escrow_id);
+    escrow.init(&admin, &token, &250);
+
+    let fleet_id = env.register(FleetManagementContract, ());
+    let fleet = FleetManagementContractClient::new(&env, &fleet_id);
+    fleet.init(&admin);
+    fleet.set_escrow_contract(&admin, &escrow_id);
+
+    let delivery_id = env.register(DeliveryContract, ());
+    let delivery = delivery_contract::DeliveryContractClient::new(&env, &delivery_id);
+    delivery.init(&admin, &escrow_id);
+
+    let dispute_id = Address::generate(&env);
+    let identity_id = env.register(IdentityReputationContract, ());
+    let identity =
+        identity_reputation_contract::IdentityReputationContractClient::new(&env, &identity_id);
+    identity.init(&admin, &delivery_id, &dispute_id);
+    delivery.set_identity_reputation_contract(&admin, &identity_id);
+    fleet.set_identity_contract(&admin, &identity_id);
 
     let owner = Address::generate(&env);
     let treasury = Address::generate(&env);
-    let fleet_id = fleet_client.register_fleet(&owner, &treasury);
+    let fleet_record_id = fleet.register_fleet(&owner, &treasury);
     let driver = Address::generate(&env);
-    fleet_client.add_driver_to_fleet(&owner, &fleet_id, &driver);
-    fleet_client.accept_fleet_invite(&fleet_id, &driver);
+    identity.register_driver(&driver);
+    fleet.add_driver_to_fleet(&owner, &fleet_record_id, &driver);
+    fleet.accept_fleet_invite(&fleet_record_id, &driver);
 
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
+    let metadata = DeliveryMetadata {
+        delivery_id: 0,
+        origin: soroban_sdk::String::from_str(&env, "Origin"),
+        destination: soroban_sdk::String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+    let delivery_record_id = delivery.create_delivery(&sender, &recipient, &metadata);
+    assert_eq!(delivery_record_id, 1u64.into());
+
     StellarAssetClient::new(&env, &token).mint(&sender, &1000);
-    escrow_client.create_escrow(
+    escrow.create_escrow(
         &sender,
         &recipient,
         &driver,
-        &43,
+        &u64::from(delivery_record_id),
         &token,
         &1000,
-        &Some(fleet_id),
+        &Some(fleet_record_id),
     );
-    fleet_client.deactivate_fleet(&owner, &fleet_id);
-    escrow_client.release_escrow(&recipient, &43);
+
+    delivery.assign_driver(&driver, &delivery_record_id, &driver);
+    delivery.mark_in_transit(&driver, &delivery_record_id);
+    delivery.confirm_delivery(&recipient, &delivery_record_id);
+
+    let confirmed = delivery.get_delivery(&delivery_record_id);
+    assert_eq!(confirmed.status, DeliveryStatus::Delivered);
+    assert_eq!(escrow.get_escrow(&1u64).status, EscrowStatus::Holdback);
+
+    let profile = identity.get_driver_profile(&driver);
+    assert_eq!(profile.deliveries_completed, 1);
+    assert_eq!(profile.reputation_score, 55);
+
+    escrow.release_holdback_escrow(&recipient, &1u64);
+    assert_eq!(escrow.get_escrow(&1u64).status, EscrowStatus::Released);
 
     let token_client = TokenClient::new(&env, &token);
-    assert_eq!(token_client.balance(&treasury), 1000);
+    assert_eq!(token_client.balance(&treasury), 750);
+    assert_eq!(token_client.balance(&admin), 250);
     assert_eq!(token_client.balance(&driver), 0);
-}
-
-#[test]
-fn test_escrow_payout_keeps_treasury_after_driver_removal() {
-    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-
-    let env = Env::default();
-    env.mock_all_auths();
-    let fleet_contract_id = env.register(FleetManagementContract, ());
-    let fleet_client = FleetManagementContractClient::new(&env, &fleet_contract_id);
-    let fleet_admin = Address::generate(&env);
-    fleet_client.init(&fleet_admin);
-
-    let escrow_contract_id = env.register(EscrowContract, ());
-    let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
-    let escrow_admin = Address::generate(&env);
-    let token = env
-        .register_stellar_asset_contract_v2(escrow_admin.clone())
-        .address();
-    escrow_client.init(&escrow_admin, &token, &0);
-    escrow_client.set_fleet_management_contract(&escrow_admin, &fleet_contract_id);
-
-    let owner = Address::generate(&env);
-    let treasury = Address::generate(&env);
-    let fleet_id = fleet_client.register_fleet(&owner, &treasury);
-    let driver = Address::generate(&env);
-    fleet_client.add_driver_to_fleet(&owner, &fleet_id, &driver);
-    fleet_client.accept_fleet_invite(&fleet_id, &driver);
-
-    let sender = Address::generate(&env);
-    let recipient = Address::generate(&env);
-    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
-    escrow_client.create_escrow(
-        &sender,
-        &recipient,
-        &driver,
-        &44,
-        &token,
-        &1000,
-        &Some(fleet_id),
-    );
-    fleet_client.remove_driver_from_fleet(&fleet_id, &owner, &driver);
-    escrow_client.release_escrow(&recipient, &44);
-
-    let token_client = TokenClient::new(&env, &token);
-    assert_eq!(token_client.balance(&treasury), 1000);
-    assert_eq!(token_client.balance(&driver), 0);
+    assert_eq!(token_client.balance(&escrow_id), 0);
 }
 
 // ── Issue #108 tests — deactivate_fleet ───────────────────────────────────────

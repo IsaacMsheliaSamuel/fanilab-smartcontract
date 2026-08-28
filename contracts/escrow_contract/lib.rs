@@ -85,6 +85,12 @@ fn get_fleet_management_contract(env: &Env) -> Option<Address> {
         .get(&DataKey::FleetManagementContract)
 }
 
+fn get_identity_reputation_contract(env: &Env) -> Option<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::IdentityReputationContract)
+}
+
 fn payout_driver(
     env: &Env,
     token: &Address,
@@ -221,23 +227,46 @@ enum DataKey {
     PendingAdmin,
     SettlementContract,
     PendingSettlementContract,
-    /// Secondary index: escrows by sender (Vec<u64> delivery IDs).
-    EscrowsBySender(Address),
-    /// Secondary index: escrows by recipient (Vec<u64> delivery IDs).
-    EscrowsByRecipient(Address),
-    /// Secondary index: escrows by driver (Vec<u64> delivery IDs).
-    EscrowsByDriver(Address),
+    EscrowIndex(Address, u32, u32),
+    EscrowIndexLen(Address, u32),
     Paused,
     FleetManagementContract,
     DisputeResolutionContract,
-    /// Payout destination snapshotted when an escrow is created.
-    EscrowPayoutAddress(u64),
+    IdentityReputationContract,
     /// Track total locked value per token
     TotalLocked(Address),
     /// Track sender volume (number of completed deliveries)
     SenderVolume(Address),
     /// Store tier configuration (volume threshold -> discount bps)
     VolumeTiers,
+}
+
+const INDEX_PAGE: u32 = 64;
+#[rustfmt::skip]
+fn index_push(env: &Env, owner: &Address, kind: u32, id: u64) {
+    let len_key = DataKey::EscrowIndexLen(owner.clone(), kind);
+    let len: u32 = env.storage().persistent().get(&len_key).unwrap_or(0);
+    let key = DataKey::EscrowIndex(owner.clone(), kind, len / INDEX_PAGE);
+    let mut page: soroban_sdk::Vec<u64> = env.storage().persistent().get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    page.push_back(id);
+    env.storage().persistent().set(&key, &page);
+    env.storage().persistent().set(&len_key, &(len + 1));
+}
+
+#[rustfmt::skip]
+fn index_page(env: &Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<u64> {
+    let len: u32 = env.storage().persistent()
+        .get(&DataKey::EscrowIndexLen(owner.clone(), kind)).unwrap_or(0);
+    let mut out = soroban_sdk::Vec::new(env);
+    let end = len.min(offset.saturating_add(limit.min(100)));
+    for i in offset.min(len)..end {
+        let page: soroban_sdk::Vec<u64> = env.storage().persistent()
+            .get(&DataKey::EscrowIndex(owner.clone(), kind, i / INDEX_PAGE))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if let Some(id) = page.get(i % INDEX_PAGE) { out.push_back(id); }
+    }
+    out
 }
 
 #[contracterror]
@@ -538,6 +567,20 @@ impl EscrowContract {
             .get(&DataKey::DisputeResolutionContract)
     }
 
+    pub fn set_identity_reputation_contract(env: Env, admin: Address, identity_contract: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityReputationContract, &identity_contract);
+    }
+
+    pub fn get_identity_reputation_contract_public(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::IdentityReputationContract)
+    }
+
     pub fn propose_admin(env: Env, current_admin: Address, new_admin: Address) {
         current_admin.require_auth();
         let stored_admin: Address = env
@@ -669,7 +712,10 @@ impl EscrowContract {
             );
         }
 
-        // Update secondary indexes.
+        index_push(&env, &sender, 0, delivery_id);
+        index_push(&env, &recipient, 1, delivery_id);
+        index_push(&env, &driver, 2, delivery_id);
+        /* Legacy indexes retained for pre-mainnet compatibility.
         let sender_key = DataKey::EscrowsBySender(sender.clone());
         let mut sender_escrows: soroban_sdk::Vec<u64> = env
             .storage()
@@ -713,6 +759,7 @@ impl EscrowContract {
             ttl::LEDGER_TTL_THRESHOLD,
             ttl::LEDGER_TTL_EXTEND_TO,
         );
+        */
 
         let token_for_tracking = record_token_clone.clone();
         let total_locked_key = DataKey::TotalLocked(token_for_tracking.clone());
@@ -754,7 +801,7 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
 
-        // Pre-load indexes for efficient batch updates.
+        /* Legacy index batching (replaced by bounded pages).
         let sender_key = DataKey::EscrowsBySender(sender.clone());
         let mut sender_escrows: soroban_sdk::Vec<u64> = env
             .storage()
@@ -771,10 +818,15 @@ impl EscrowContract {
 
         let mut driver_indexes: soroban_sdk::Map<DataKey, soroban_sdk::Vec<u64>> =
             soroban_sdk::Map::new(&env);
+        */
 
         let mut count = 0u32;
+        let mut batch_total: i128 = 0;
         for i in 0..escrow_list.len() {
             if let Some((delivery_id, driver, amount)) = escrow_list.get(i) {
+                if amount <= 0 {
+                    panic_with_error!(&env, EscrowError::InvalidAmount);
+                }
                 if env.storage().persistent().has(&escrow_key(delivery_id)) {
                     panic_with_error!(&env, EscrowError::DuplicateDelivery);
                 }
@@ -783,6 +835,7 @@ impl EscrowContract {
                     env.current_contract_address(),
                     &amount,
                 );
+                batch_total = batch_total.saturating_add(amount);
                 let created_at = env.ledger().timestamp();
                 let expires_at =
                     created_at.saturating_add(constants::DEFAULT_ESCROW_EXPIRY_SECONDS);
@@ -803,10 +856,15 @@ impl EscrowContract {
                         fleet_id: None,
                     },
                 );
+                /*
                 sender_escrows.push_back(delivery_id);
                 recipient_escrows.push_back(delivery_id);
+                */
+                index_push(&env, &sender, 0, delivery_id);
+                index_push(&env, &recipient, 1, delivery_id);
+                index_push(&env, &driver, 2, delivery_id);
 
-                // Track drivers separately for efficient index updates.
+                /* Legacy driver index.
                 let driver_key = DataKey::EscrowsByDriver(driver.clone());
                 if !driver_indexes.contains_key(driver_key.clone()) {
                     let existing: soroban_sdk::Vec<u64> = env
@@ -820,16 +878,22 @@ impl EscrowContract {
                     driver_escrows_vec.push_back(delivery_id);
                     driver_indexes.set(driver_key, driver_escrows_vec);
                 }
+                */
 
                 env.events().publish(
-                    (events::escrow_funded(&env), delivery_id),
-                    (sender.clone(), recipient.clone(), amount),
+                    (events::escrow_funded(&env),),
+                    shared_types::EscrowFundedEvent {
+                        delivery_id,
+                        sender: sender.clone(),
+                        token: token.clone(),
+                        amount,
+                    },
                 );
                 count += 1;
             }
         }
 
-        // Save all updated indexes.
+        /* Legacy index flush.
         env.storage().persistent().set(&sender_key, &sender_escrows);
         env.storage().persistent().extend_ttl(
             &sender_key,
@@ -856,6 +920,24 @@ impl EscrowContract {
                 ttl::LEDGER_TTL_EXTEND_TO,
             );
         }
+        */
+
+        // Maintain the TotalLocked fund-accounting invariant (Issue #188):
+        // batch-created escrows must count toward TotalLocked exactly like
+        // single-escrow creates, otherwise sweep_untracked_balance would treat
+        // the batch funds as untracked surplus and drain them. A batch shares
+        // one token, so accumulate in the loop and do a single read-modify-
+        // write here instead of one storage round-trip per element.
+        let total_locked_key = DataKey::TotalLocked(token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_add(batch_total),
+        );
 
         count
     }
@@ -992,6 +1074,41 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InsufficientFunds);
         }
 
+        // If refunding from Holdback (delivery was confirmed and driver credited reputation),
+        // reverse the reputation gain before transferring funds. Use the same penalty mechanism
+        // as resolve_dispute_refund_sender for consistency with the accounting invariant:
+        // "reputation credited for a delivery implies the driver was paid for it".
+        let is_holdback_refund = record.status == EscrowStatus::Holdback;
+        if is_holdback_refund {
+            if let Some(reputation_addr) = get_identity_reputation_contract(&env) {
+                // Query dispute_resolution_contract for the penalty, or use a default if unavailable.
+                // This ensures consistency across all refund paths.
+                let penalty: u32 = if let Some(dispute_addr) = 
+                    env.storage().instance().get::<DataKey, Address>(&DataKey::DisputeResolutionContract)
+                {
+                    env.invoke_contract(
+                        &dispute_addr,
+                        &Symbol::new(&env, "get_dispute_reputation_penalty"),
+                        soroban_sdk::vec![&env],
+                    )
+                } else {
+                    10u32 // DEFAULT_DISPUTE_REPUTATION_PENALTY
+                };
+
+                use soroban_sdk::IntoVal;
+                let _: () = env.invoke_contract(
+                    &reputation_addr,
+                    &Symbol::new(&env, "decrease_reputation"),
+                    soroban_sdk::vec![
+                        &env,
+                        env.current_contract_address().into_val(&env),
+                        record.driver.clone().into_val(&env),
+                        penalty.into_val(&env),
+                    ],
+                );
+            }
+        }
+
         // Effects (state) are committed before the interaction (transfer)
         // below, per checks-effects-interactions.
         record.status = EscrowStatus::Refunded;
@@ -1031,7 +1148,15 @@ impl EscrowContract {
         if caller != record.sender && caller != record.recipient && caller != record.driver {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
-        if record.status != EscrowStatus::Locked {
+        // Accept both Locked (pre-delivery dispute) and Holdback (post-delivery
+        // dispute, after recipient has confirmed but before escrow is released).
+        // This unblocks the Delivered → Disputed transition described in issue
+        // #193: after confirm_delivery the escrow is in Holdback, not Locked,
+        // so rejecting Holdback here made post-delivery disputes unreachable.
+        // freeze_funds already treats Locked and Holdback identically, which
+        // establishes the precedent that the transition is sound.  Terminal
+        // states (Released, Refunded, Split) are still rejected.
+        if record.status != EscrowStatus::Locked && record.status != EscrowStatus::Holdback {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
         let timestamp = env.ledger().timestamp();
@@ -1059,6 +1184,20 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
 
+        // Balance verification guard: confirm contract holds sufficient funds
+        // before any state mutation or transfer.  Runs for both branches so
+        // that a shortfall produces the typed InsufficientFunds error in all
+        // cases rather than an opaque token-level failure deep inside
+        // settle_escrow_funds (release branch) or the token transfer (refund
+        // branch).  Matches the pattern used by release_escrow,
+        // refund_escrow, release_holdback_escrow, resolve_dispute_split, and
+        // reclaim_expired_escrow.  See issue #194.
+        let contract_balance =
+            token::Client::new(&env, &record.token).balance(&env.current_contract_address());
+        if contract_balance < record.amount {
+            panic_with_error!(&env, EscrowError::InsufficientFunds);
+        }
+
         // Checks + effects (state) are resolved per-branch first; the actual
         // fund transfer (interaction) happens only after all state below is
         // committed, per checks-effects-interactions.
@@ -1083,11 +1222,6 @@ impl EscrowContract {
             record.status = EscrowStatus::Released;
             get_fleet_management_contract(&env)
         } else {
-            let contract_balance =
-                token::Client::new(&env, &record.token).balance(&env.current_contract_address());
-            if contract_balance < record.amount {
-                panic_with_error!(&env, EscrowError::InsufficientFunds);
-            }
             record.status = EscrowStatus::Refunded;
             None
         };
@@ -1133,7 +1267,22 @@ impl EscrowContract {
     ) {
         caller.require_auth();
         require_not_paused(&env);
-        require_admin(&env, &caller);
+        // Allow calls from either the admin or the dispute resolution contract.
+        // This enables both admin-initiated resolutions and automatic force-resolve
+        // timeouts (where the dispute_resolution_contract calls on its own behalf).
+        let is_caller_admin = is_admin(&env, &caller);
+        let is_caller_dispute_contract = if let Some(dispute_contract) =
+            env.storage()
+                .instance()
+                .get::<_, Address>(&DataKey::DisputeResolutionContract)
+        {
+            caller == dispute_contract
+        } else {
+            false
+        };
+        if !is_caller_admin && !is_caller_dispute_contract {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
         if sender_share_bps > 10000 {
             panic_with_error!(&env, EscrowError::InvalidFee);
         }
@@ -1337,29 +1486,22 @@ impl EscrowContract {
 
     /// Get all escrow delivery IDs for a sender.
     pub fn get_escrows_by_sender(env: Env, sender: Address) -> soroban_sdk::Vec<u64> {
-        let key = DataKey::EscrowsBySender(sender);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, sender, 0, 0, 100)
     }
 
     /// Get all escrow delivery IDs for a recipient.
     pub fn get_escrows_by_recipient(env: Env, recipient: Address) -> soroban_sdk::Vec<u64> {
-        let key = DataKey::EscrowsByRecipient(recipient);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, recipient, 1, 0, 100)
     }
 
     /// Get all escrow delivery IDs for a driver.
     pub fn get_escrows_by_driver(env: Env, driver: Address) -> soroban_sdk::Vec<u64> {
-        let key = DataKey::EscrowsByDriver(driver);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, driver, 2, 0, 100)
+    }
+
+    #[rustfmt::skip]
+    pub fn get_escrows_page(env: Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<u64> {
+        index_page(&env, owner, kind, offset, limit)
     }
 
     pub fn get_total_locked(env: Env, token: Address) -> i128 {
@@ -1367,8 +1509,25 @@ impl EscrowContract {
         env.storage().persistent().get(&key).unwrap_or(0)
     }
 
+    /// Returns the amount of untracked balance for a given token without executing
+    /// a sweep. This is a read-only view function used for visibility and monitoring.
+    /// 
+    /// Untracked balance = contract_balance - total_locked. If the contract balance
+    /// is less than or equal to total_locked, returns 0 (indicating nothing to sweep).
+    ///
+    /// This allows operators to:
+    /// 1. Verify the sweep amount before executing sweep_untracked_balance
+    /// 2. Monitor untracked balance as a key metric
+    /// 3. Detect misclassified funds (issue #188)
+    pub fn get_untracked_balance(env: Env, token: Address) -> i128 {
+        let contract_balance =
+            token::Client::new(&env, &token).balance(&env.current_contract_address());
+        let total_locked = Self::get_total_locked(env, token);
+        contract_balance.saturating_sub(total_locked)
+    }
+
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
-    pub fn sweep_untracked_balance(env: Env, admin: Address, token: Address, recipient: Address) {
+    pub fn sweep_untracked_balance(env: Env, admin: Address, token: Address, recipient: Address) -> i128 {
         admin.require_auth();
         require_admin(&env, &admin);
 
@@ -1377,7 +1536,7 @@ impl EscrowContract {
         let total_locked = Self::get_total_locked(env.clone(), token.clone());
 
         if contract_balance <= total_locked {
-            return;
+            return 0;
         }
 
         let untracked_balance = contract_balance.saturating_sub(total_locked);
@@ -1389,8 +1548,10 @@ impl EscrowContract {
 
         env.events().publish(
             (Symbol::new(&env, "untracked_balance_swept"),),
-            (token, untracked_balance, recipient),
+            (token.clone(), untracked_balance, recipient),
         );
+
+        untracked_balance
     }
 
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
