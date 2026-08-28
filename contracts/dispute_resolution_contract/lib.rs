@@ -19,6 +19,22 @@ const MIN_DISPUTE_TIME_LIMIT: u64 = 86400; // 1 day in seconds
 /// without bound, inflating that entry's rent/TTL-extension cost indefinitely.
 const MAX_EVIDENCE_HASHES: u32 = 20;
 
+fn require_escrow_not_paused(env: &Env) {
+    let escrow_contract: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::EscrowContract)
+        .unwrap_or_else(|| panic_with_error!(env, FaniLabError::NotInitialized));
+    let paused: bool = env.invoke_contract(
+        &escrow_contract,
+        &Symbol::new(env, "is_paused"),
+        soroban_sdk::vec![env],
+    );
+    if paused {
+        panic_with_error!(env, FaniLabError::ProtocolPaused);
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DisputeStatus {
@@ -353,6 +369,7 @@ impl DisputeResolutionContract {
         evidence_hash: BytesN<32>,
     ) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let dispute_key = DataKey::Dispute(delivery_id);
         let mut dispute: DisputeCase = env
@@ -400,6 +417,7 @@ impl DisputeResolutionContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn resolve_dispute_refund_sender(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -487,6 +505,7 @@ impl DisputeResolutionContract {
         sender_share_bps: u32,
     ) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -579,6 +598,7 @@ impl DisputeResolutionContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn resolve_dispute_pay_driver(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -659,6 +679,7 @@ impl DisputeResolutionContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn force_resolve_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let dispute_key = DataKey::Dispute(delivery_id);
         let dispute: DisputeCase = env

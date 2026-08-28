@@ -15,6 +15,22 @@ use soroban_sdk::{
 /// Maximum deliveries per batch to stay within Soroban resource limits.
 pub const MAX_BATCH_SIZE: u32 = 100;
 
+fn require_escrow_not_paused(env: &Env) {
+    let escrow_contract: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::EscrowContract)
+        .unwrap_or_else(|| panic_with_error!(env, FaniLabError::NotInitialized));
+    let paused: bool = env.invoke_contract(
+        &escrow_contract,
+        &Symbol::new(env, "is_paused"),
+        soroban_sdk::vec![env],
+    );
+    if paused {
+        panic_with_error!(env, FaniLabError::ProtocolPaused);
+    }
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -183,6 +199,7 @@ impl DeliveryContract {
         metadata: DeliveryMetadata,
     ) -> DeliveryId {
         sender.require_auth();
+        require_escrow_not_paused(&env);
 
         validate_delivery_metadata(&env, &metadata)
             .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
@@ -312,6 +329,7 @@ impl DeliveryContract {
         metadata_list: soroban_sdk::Vec<DeliveryMetadata>,
     ) -> soroban_sdk::Vec<DeliveryId> {
         sender.require_auth();
+        require_escrow_not_paused(&env);
 
         if metadata_list.len() > MAX_BATCH_SIZE {
             panic_with_error!(&env, DeliveryError::BatchTooLarge);
@@ -435,6 +453,7 @@ impl DeliveryContract {
         metadata: DeliveryMetadata,
     ) {
         sender.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
@@ -476,6 +495,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn cancel_delivery(env: Env, sender: Address, delivery_id: DeliveryId) {
         sender.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
@@ -523,6 +543,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn assign_driver(env: Env, caller: Address, delivery_id: DeliveryId, driver: Address) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let is_caller_admin = is_admin(&env, &caller);
         let is_self_assignment = caller == driver;
@@ -569,6 +590,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn mark_in_transit(env: Env, driver: Address, delivery_id: DeliveryId) {
         driver.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
@@ -606,6 +628,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn confirm_delivery(env: Env, recipient: Address, delivery_id: DeliveryId) {
         recipient.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
