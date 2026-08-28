@@ -1711,6 +1711,159 @@ fn test_volume_tier_fee_discount_applied() {
 }
 
 #[test]
+fn test_set_volume_tiers_rejects_descending_thresholds() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    client.init(&admin, &token, &100);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 50u32,
+        discount_bps: 100u32,
+    });
+    tiers.push_back(VolumeTier {
+        volume_threshold: 10u32,
+        discount_bps: 50u32,
+    });
+
+    let result = client.try_set_volume_tiers(&admin, &tiers);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidFee.into()),
+        _ => panic!("Expected EscrowError::InvalidFee on descending tier list"),
+    }
+}
+
+#[test]
+fn test_set_volume_tiers_rejects_duplicate_thresholds() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    client.init(&admin, &token, &100);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 10u32,
+        discount_bps: 50u32,
+    });
+    tiers.push_back(VolumeTier {
+        volume_threshold: 10u32,
+        discount_bps: 100u32,
+    });
+
+    let result = client.try_set_volume_tiers(&admin, &tiers);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidFee.into()),
+        _ => panic!("Expected EscrowError::InvalidFee on duplicate tier threshold"),
+    }
+}
+
+#[test]
+fn test_set_volume_tiers_rejects_discount_over_ceiling() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    client.init(&admin, &token, &100);
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 10u32,
+        discount_bps: constants::MAX_PLATFORM_FEE_BPS + 1,
+    });
+
+    let result = client.try_set_volume_tiers(&admin, &tiers);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidFee.into()),
+        _ => panic!("Expected EscrowError::InvalidFee on out-of-range discount_bps"),
+    }
+}
+
+#[test]
+fn test_valid_ascending_tiers_select_correct_tier_at_each_boundary() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    client.init(&admin, &token, &500); // 5% base fee
+
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 10u32,
+        discount_bps: 100u32, // -1%
+    });
+    tiers.push_back(VolumeTier {
+        volume_threshold: 50u32,
+        discount_bps: 200u32, // -2%
+    });
+    tiers.push_back(VolumeTier {
+        volume_threshold: 100u32,
+        discount_bps: 300u32, // -3%
+    });
+    client.set_volume_tiers(&admin, &tiers);
+
+    let retrieved = client.get_volume_tiers();
+    assert_eq!(retrieved.len(), 3u32);
+
+    env.as_contract(&contract_id, || {
+        // Below the first threshold: base fee applies unmodified.
+        assert_eq!(get_effective_fee_bps(&env, 500, 0), 500);
+        assert_eq!(get_effective_fee_bps(&env, 500, 9), 500);
+        // Exactly at / above the first threshold, below the second.
+        assert_eq!(get_effective_fee_bps(&env, 500, 10), 400);
+        assert_eq!(get_effective_fee_bps(&env, 500, 49), 400);
+        // Exactly at / above the second threshold, below the third.
+        assert_eq!(get_effective_fee_bps(&env, 500, 50), 300);
+        assert_eq!(get_effective_fee_bps(&env, 500, 99), 300);
+        // Exactly at / above the third threshold.
+        assert_eq!(get_effective_fee_bps(&env, 500, 100), 200);
+        assert_eq!(get_effective_fee_bps(&env, 500, 1_000_000), 200);
+    });
+}
+
+#[test]
+fn test_empty_volume_tiers_disables_tiering() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    client.init(&admin, &token, &500); // 5% base fee
+
+    // First configure a non-empty tier list...
+    let mut tiers = soroban_sdk::Vec::new(&env);
+    tiers.push_back(VolumeTier {
+        volume_threshold: 10u32,
+        discount_bps: 100u32,
+    });
+    client.set_volume_tiers(&admin, &tiers);
+    assert_eq!(client.get_volume_tiers().len(), 1u32);
+
+    // ...then explicitly disable tiering with an empty vector.
+    let empty_tiers = soroban_sdk::Vec::new(&env);
+    client.set_volume_tiers(&admin, &empty_tiers);
+
+    let retrieved = client.get_volume_tiers();
+    assert_eq!(retrieved.len(), 0u32);
+
+    env.as_contract(&contract_id, || {
+        assert_eq!(get_effective_fee_bps(&env, 500, 0), 500);
+        assert_eq!(get_effective_fee_bps(&env, 500, 1_000_000), 500);
+    });
+}
+
+#[test]
 fn test_resolve_dispute_split_full_sender_share() {
     let (env, contract_id) = setup_env();
     let client = EscrowContractClient::new(&env, &contract_id);

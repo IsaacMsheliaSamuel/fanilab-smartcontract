@@ -58,6 +58,31 @@ fn calculate_fee(amount: i128, platform_fee_bps: u32) -> i128 {
     amount.saturating_mul(platform_fee_bps as i128) / 10_000
 }
 
+/// Validates a volume tier list before it is written to storage.
+///
+/// `get_effective_fee_bps` walks the stored tiers in reverse and returns on
+/// the first entry whose `volume_threshold` the sender meets, which is only
+/// correct if the list is sorted strictly ascending by `volume_threshold`.
+/// This also rejects duplicate thresholds, since a strictly ascending
+/// sequence cannot repeat a value. Each tier's `discount_bps` is bounded by
+/// `MAX_PLATFORM_FEE_BPS` so a misconfigured tier can never be worse than a
+/// silently-saturated 0% fee or an out-of-range value.
+fn validate_volume_tiers(env: &Env, tiers: &soroban_sdk::Vec<VolumeTier>) {
+    let mut prev_threshold: Option<u32> = None;
+    for i in 0..tiers.len() {
+        let tier = tiers.get(i).unwrap();
+        if tier.discount_bps > constants::MAX_PLATFORM_FEE_BPS {
+            panic_with_error!(env, EscrowError::InvalidFee);
+        }
+        if let Some(prev) = prev_threshold {
+            if tier.volume_threshold <= prev {
+                panic_with_error!(env, EscrowError::InvalidFee);
+            }
+        }
+        prev_threshold = Some(tier.volume_threshold);
+    }
+}
+
 fn get_effective_fee_bps(env: &Env, base_fee_bps: u32, sender_volume: u32) -> u32 {
     let tiers: Option<soroban_sdk::Vec<VolumeTier>> =
         env.storage().persistent().get(&DataKey::VolumeTiers);
@@ -1558,6 +1583,7 @@ impl EscrowContract {
     pub fn set_volume_tiers(env: Env, admin: Address, tiers: soroban_sdk::Vec<VolumeTier>) {
         admin.require_auth();
         require_admin(&env, &admin);
+        validate_volume_tiers(&env, &tiers);
 
         env.storage()
             .persistent()
