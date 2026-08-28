@@ -78,6 +78,19 @@ impl MaliciousSettlementContract {
     }
 }
 
+#[contract]
+struct MockFleetManagementContract;
+
+#[contractimpl]
+impl MockFleetManagementContract {
+    pub fn get_payout_address(env: Env, _driver: Address, _fleet_id: u64) -> Address {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "treasury"))
+            .unwrap()
+    }
+}
+
 #[test]
 fn test_init_and_platform_fee_default() {
     let (env, contract_id) = setup_env();
@@ -121,6 +134,66 @@ fn test_update_platform_fee_invalid_value() {
         Err(Ok(err)) => assert_eq!(err, EscrowError::InvalidFee.into()),
         _ => panic!("Expected EscrowError::InvalidFee"),
     }
+}
+
+#[test]
+fn test_set_and_get_fleet_management_contract() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let fleet_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    assert_eq!(client.get_fleet_management_contract(), None);
+
+    client.set_fleet_management_contract(&admin, &fleet_contract);
+
+    assert_eq!(
+        client.get_fleet_management_contract(),
+        Some(fleet_contract)
+    );
+}
+
+#[test]
+fn test_release_escrow_routes_fleet_payout_to_treasury() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let fleet_contract = env.register(MockFleetManagementContract, ());
+
+    env.as_contract(&fleet_contract, || {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "treasury"), &treasury);
+    });
+
+    client.init(&admin, &token, &0);
+    client.set_fleet_management_contract(&admin, &fleet_contract);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &20u64,
+        &token,
+        &1000,
+        &Some(7u64),
+    );
+
+    client.release_escrow(&recipient, &20u64);
+
+    assert_eq!(balance(&env, &token, &treasury), 1000);
+    assert_eq!(balance(&env, &token, &driver), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 0);
+    assert_eq!(client.get_escrow(&20u64).status, EscrowStatus::Released);
 }
 
 #[test]
@@ -529,6 +602,122 @@ fn test_create_escrow_with_fleet_id_stores_fleet_reference() {
 
     let record = client.get_escrow(&12u64);
     assert_eq!(record.fleet_id, Some(42u64));
+}
+
+#[test]
+fn test_escrow_secondary_indexes_track_sender_recipient_and_driver() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let sender_a = Address::generate(&env);
+    let sender_b = Address::generate(&env);
+    let recipient_a = Address::generate(&env);
+    let recipient_b = Address::generate(&env);
+    let driver_a = Address::generate(&env);
+    let driver_b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender_a, 200);
+    mint(&env, &token, &sender_b, 100);
+
+    client.create_escrow(
+        &sender_a,
+        &recipient_a,
+        &driver_a,
+        &1u64,
+        &token,
+        &100,
+        &None,
+    );
+    client.create_escrow(
+        &sender_a,
+        &recipient_b,
+        &driver_b,
+        &2u64,
+        &token,
+        &100,
+        &None,
+    );
+    client.create_escrow(
+        &sender_b,
+        &recipient_a,
+        &driver_a,
+        &3u64,
+        &token,
+        &100,
+        &None,
+    );
+
+    let sender_a_escrows = client.get_escrows_by_sender(&sender_a);
+    assert_eq!(sender_a_escrows.len(), 2);
+    assert_eq!(sender_a_escrows.get(0), Some(1));
+    assert_eq!(sender_a_escrows.get(1), Some(2));
+
+    let recipient_a_escrows = client.get_escrows_by_recipient(&recipient_a);
+    assert_eq!(recipient_a_escrows.len(), 2);
+    assert_eq!(recipient_a_escrows.get(0), Some(1));
+    assert_eq!(recipient_a_escrows.get(1), Some(3));
+
+    let driver_a_escrows = client.get_escrows_by_driver(&driver_a);
+    assert_eq!(driver_a_escrows.len(), 2);
+    assert_eq!(driver_a_escrows.get(0), Some(1));
+    assert_eq!(driver_a_escrows.get(1), Some(3));
+
+    let missing = Address::generate(&env);
+    assert_eq!(client.get_escrows_by_sender(&missing).len(), 0);
+}
+
+#[test]
+fn test_escrow_batch_secondary_indexes_append_ids() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver_a = Address::generate(&env);
+    let driver_b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 300);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver_a,
+        &10u64,
+        &token,
+        &100,
+        &None,
+    );
+
+    let mut escrow_list = soroban_sdk::Vec::new(&env);
+    escrow_list.push_back((11u64, driver_a.clone(), 100i128));
+    escrow_list.push_back((12u64, driver_b.clone(), 100i128));
+    assert_eq!(
+        client.create_escrows_batch(&sender, &recipient, &token, &escrow_list),
+        2
+    );
+
+    let sender_escrows = client.get_escrows_by_sender(&sender);
+    assert_eq!(sender_escrows.len(), 3);
+    assert_eq!(sender_escrows.get(0), Some(10));
+    assert_eq!(sender_escrows.get(1), Some(11));
+    assert_eq!(sender_escrows.get(2), Some(12));
+
+    let recipient_escrows = client.get_escrows_by_recipient(&recipient);
+    assert_eq!(recipient_escrows.len(), 3);
+    assert_eq!(recipient_escrows.get(0), Some(10));
+    assert_eq!(recipient_escrows.get(1), Some(11));
+    assert_eq!(recipient_escrows.get(2), Some(12));
+
+    let driver_a_escrows = client.get_escrows_by_driver(&driver_a);
+    assert_eq!(driver_a_escrows.len(), 2);
+    assert_eq!(driver_a_escrows.get(0), Some(10));
+    assert_eq!(driver_a_escrows.get(1), Some(11));
+    assert_eq!(client.get_escrows_by_driver(&driver_b).get(0), Some(12));
 }
 
 #[test]
