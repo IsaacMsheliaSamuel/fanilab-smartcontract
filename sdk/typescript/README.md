@@ -14,9 +14,18 @@ npm install @fanilab/sdk
 
 ```typescript
 import { EscrowClient, DeliveryClient } from '@fanilab/sdk';
+import { Keypair } from '@stellar/stellar-sdk';
 
-const escrowClient = new EscrowClient('CABC...');
-const deliveryClient = new DeliveryClient('CBDE...');
+const keypair = Keypair.fromSecret('SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+
+const invocation = {
+  serverUrl: 'https://soroban-testnet.stellar.org',
+  networkPassphrase: 'Test SDF Network ; September 2015',
+  sourceAccount: 'GA123...',
+  signer: keypair,
+};
+const escrowClient = new EscrowClient('CABC...', invocation);
+const deliveryClient = new DeliveryClient('CBDE...', invocation);
 ```
 
 ### Create an Escrow
