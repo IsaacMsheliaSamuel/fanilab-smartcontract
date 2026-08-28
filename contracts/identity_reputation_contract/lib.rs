@@ -279,6 +279,11 @@ impl IdentityReputationContract {
         profile
     }
 
+    pub fn has_user_profile(env: Env, user: Address) -> bool {
+        let key = DataKey::UserProfile(user);
+        env.storage().persistent().has(&key)
+    }
+
     pub fn get_driver_profile(env: Env, driver: Address) -> DriverProfile {
         let key = DataKey::DriverProfile(driver);
         let profile: DriverProfile = env
