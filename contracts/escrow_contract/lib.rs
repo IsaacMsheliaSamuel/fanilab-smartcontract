@@ -767,8 +767,12 @@ impl EscrowContract {
         */
 
         let mut count = 0u32;
+        let mut batch_total: i128 = 0;
         for i in 0..escrow_list.len() {
             if let Some((delivery_id, driver, amount)) = escrow_list.get(i) {
+                if amount <= 0 {
+                    panic_with_error!(&env, EscrowError::InvalidAmount);
+                }
                 if env.storage().persistent().has(&escrow_key(delivery_id)) {
                     panic_with_error!(&env, EscrowError::DuplicateDelivery);
                 }
@@ -777,6 +781,7 @@ impl EscrowContract {
                     env.current_contract_address(),
                     &amount,
                 );
+                batch_total = batch_total.saturating_add(amount);
                 let created_at = env.ledger().timestamp();
                 let expires_at =
                     created_at.saturating_add(constants::DEFAULT_ESCROW_EXPIRY_SECONDS);
@@ -857,6 +862,23 @@ impl EscrowContract {
             );
         }
         */
+
+        // Maintain the TotalLocked fund-accounting invariant (Issue #188):
+        // batch-created escrows must count toward TotalLocked exactly like
+        // single-escrow creates, otherwise sweep_untracked_balance would treat
+        // the batch funds as untracked surplus and drain them. A batch shares
+        // one token, so accumulate in the loop and do a single read-modify-
+        // write here instead of one storage round-trip per element.
+        let total_locked_key = DataKey::TotalLocked(token.clone());
+        let current_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&total_locked_key)
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &total_locked_key,
+            &current_total.saturating_add(batch_total),
+        );
 
         count
     }
