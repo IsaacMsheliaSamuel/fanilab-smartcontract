@@ -15,6 +15,19 @@ pub mod constants {
     pub const DEFAULT_ESCROW_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
     pub const MAX_PLATFORM_FEE_BPS: u32 = 1000;
     pub const SETTLEMENT_CONTRACT_TIMELOCK_SECONDS: u64 = 3 * 24 * 60 * 60; // 3 days
+    /// Default time a recipient has, after confirming delivery (i.e. after
+    /// `mark_holdback_escrow` moves an escrow into `Holdback`), to either
+    /// release it to the driver or raise a dispute before the driver may
+    /// claim it permissionlessly via `release_expired_holdback`.
+    /// Admin-configurable via `set_holdback_window`, subject to
+    /// `MIN_HOLDBACK_WINDOW_SECONDS` (Issue #192).
+    pub const DEFAULT_HOLDBACK_WINDOW_SECONDS: u64 = 3 * 24 * 60 * 60; // 3 days
+    /// Minimum permitted holdback window. Mirrors the
+    /// `MIN_DISPUTE_TIME_LIMIT` precedent in `dispute_resolution_contract`:
+    /// it stops an admin from configuring a window so short it defeats the
+    /// recipient's realistic opportunity to release or dispute the escrow
+    /// before the driver can claim it unilaterally.
+    pub const MIN_HOLDBACK_WINDOW_SECONDS: u64 = 24 * 60 * 60; // 1 day
 }
 
 fn require_admin(env: &Env, caller: &Address) {
@@ -102,6 +115,13 @@ fn get_effective_fee_bps(env: &Env, base_fee_bps: u32, sender_volume: u32) -> u3
 
 fn get_settlement_contract(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::SettlementContract)
+}
+
+fn get_holdback_window(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::HoldbackWindow)
+        .unwrap_or(constants::DEFAULT_HOLDBACK_WINDOW_SECONDS)
 }
 
 fn get_fleet_management_contract(env: &Env) -> Option<Address> {
@@ -221,6 +241,60 @@ fn settle_escrow_funds(
     }
 }
 
+/// Shared settlement logic for moving an escrow out of `Holdback` into
+/// `Released` and paying the driver (minus the platform fee). Used by both
+/// the recipient/admin-initiated `release_holdback_escrow` and the
+/// permissionless `release_expired_holdback` (Issue #192) — the only
+/// difference between the two call sites is which authorization/timing
+/// checks are performed before this runs. Returns `(driver_amount,
+/// platform_fee)` so each caller can emit its own event.
+fn settle_holdback_escrow(env: &Env, delivery_id: u64, mut record: EscrowRecord) -> (i128, i128) {
+    // Balance verification guard: confirm contract holds sufficient funds before transfer
+    let contract_balance =
+        token::Client::new(env, &record.token).balance(&env.current_contract_address());
+    if contract_balance < record.amount {
+        panic_with_error!(env, EscrowError::InsufficientFunds);
+    }
+
+    let base_fee_bps: u32 = env
+        .storage()
+        .instance()
+        .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
+        .map(|config| config.platform_fee_bps)
+        .unwrap_or(0);
+
+    let sender_volume = EscrowContract::get_sender_volume(env.clone(), record.sender.clone());
+    let effective_fee_bps = get_effective_fee_bps(env, base_fee_bps, sender_volume);
+    let platform_fee = calculate_fee(record.amount, effective_fee_bps);
+    let driver_amount = record.amount.saturating_sub(platform_fee);
+
+    let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
+    env.storage()
+        .persistent()
+        .set(&sender_volume_key, &sender_volume.saturating_add(1));
+
+    // Effects (state) are committed before the interaction (transfer)
+    // below, per checks-effects-interactions.
+    record.status = EscrowStatus::Released;
+    save_escrow(env, delivery_id, &record);
+
+    let total_locked_key = DataKey::TotalLocked(record.token.clone());
+    let current_total: i128 = env
+        .storage()
+        .persistent()
+        .get(&total_locked_key)
+        .unwrap_or(0);
+    env.storage().persistent().set(
+        &total_locked_key,
+        &current_total.saturating_sub(record.amount),
+    );
+
+    let fleet_management = get_fleet_management_contract(env);
+    settle_escrow_funds(env, &record, fleet_management);
+
+    (driver_amount, platform_fee)
+}
+
 fn save_escrow(env: &Env, delivery_id: u64, record: &EscrowRecord) {
     let key = escrow_key(delivery_id);
     env.storage().persistent().set(&key, record);
@@ -264,6 +338,11 @@ enum DataKey {
     SenderVolume(Address),
     /// Store tier configuration (volume threshold -> discount bps)
     VolumeTiers,
+    /// Admin-configurable window (seconds) an escrow may sit in `Holdback`
+    /// before `release_expired_holdback` may settle it to the driver
+    /// permissionlessly. Falls back to `DEFAULT_HOLDBACK_WINDOW_SECONDS`
+    /// when unset (Issue #192).
+    HoldbackWindow,
 }
 
 const INDEX_PAGE: u32 = 64;
@@ -724,6 +803,7 @@ impl EscrowContract {
                 expires_at: Some(expires_at),
                 disputed_by: None,
                 disputed_at: None,
+                holdback_started_at: None,
                 fleet_id,
             },
         );
@@ -878,6 +958,7 @@ impl EscrowContract {
                         expires_at: Some(expires_at),
                         disputed_by: None,
                         disputed_at: None,
+                        holdback_started_at: None,
                         fleet_id: None,
                     },
                 );
@@ -979,11 +1060,13 @@ impl EscrowContract {
         if record.status != EscrowStatus::Locked {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
+        let timestamp = env.ledger().timestamp();
         record.status = EscrowStatus::Holdback;
+        record.holdback_started_at = Some(timestamp);
         save_escrow(&env, delivery_id, &record);
         env.events().publish(
             (Symbol::new(&env, "escrow_holdback_marked"), delivery_id),
-            (caller, env.ledger().timestamp()),
+            (caller, timestamp),
         );
     }
 
@@ -1368,7 +1451,7 @@ impl EscrowContract {
     pub fn release_holdback_escrow(env: Env, caller: Address, delivery_id: u64) {
         caller.require_auth();
         require_not_paused(&env);
-        let mut record = load_escrow(&env, delivery_id);
+        let record = load_escrow(&env, delivery_id);
         let admin_authorized = is_admin(&env, &caller);
         let recipient_authorized = caller == record.recipient;
         if !admin_authorized && !recipient_authorized {
@@ -1377,52 +1460,67 @@ impl EscrowContract {
         if record.status != EscrowStatus::Holdback {
             panic_with_error!(&env, EscrowError::InvalidState);
         }
-        // Balance verification guard: confirm contract holds sufficient funds before transfer
-        let contract_balance =
-            token::Client::new(&env, &record.token).balance(&env.current_contract_address());
-        if contract_balance < record.amount {
-            panic_with_error!(&env, EscrowError::InsufficientFunds);
-        }
-        let base_fee_bps: u32 = env
-            .storage()
-            .instance()
-            .get::<_, ProtocolConfig>(&StorageKey::ProtocolConfig)
-            .map(|config| config.platform_fee_bps)
-            .unwrap_or(0);
+        let driver = record.driver.clone();
+        let (driver_amount, platform_fee) = settle_holdback_escrow(&env, delivery_id, record);
 
-        let sender_volume = Self::get_sender_volume(env.clone(), record.sender.clone());
-        let effective_fee_bps = get_effective_fee_bps(&env, base_fee_bps, sender_volume);
-        let platform_fee = calculate_fee(record.amount, effective_fee_bps);
-        let driver_amount = record.amount.saturating_sub(platform_fee);
-
-        let sender_volume_key = DataKey::SenderVolume(record.sender.clone());
-        env.storage()
-            .persistent()
-            .set(&sender_volume_key, &sender_volume.saturating_add(1));
-
-        // Effects (state) are committed before the interaction (transfer)
-        // below, per checks-effects-interactions.
-        record.status = EscrowStatus::Released;
-        save_escrow(&env, delivery_id, &record);
-
-        let total_locked_key = DataKey::TotalLocked(record.token.clone());
-        let current_total: i128 = env
-            .storage()
-            .persistent()
-            .get(&total_locked_key)
-            .unwrap_or(0);
-        env.storage().persistent().set(
-            &total_locked_key,
-            &current_total.saturating_sub(record.amount),
+        env.events().publish(
+            (events::escrow_released(&env), delivery_id),
+            (driver, driver_amount, platform_fee),
         );
+    }
+
+    /// Permissionless counterpart to `release_holdback_escrow`: once an
+    /// escrow has sat in `Holdback` for at least `get_holdback_window()`
+    /// seconds since `mark_holdback_escrow` set `holdback_started_at`,
+    /// *anyone* may call this to settle it to the driver. Without this, a
+    /// recipient who never calls `release_holdback_escrow` (and no dispute is
+    /// raised to freeze the escrow) could strand the driver's funds in
+    /// `Holdback` indefinitely, since the only other exits require the
+    /// recipient or an admin to act (Issue #192).
+    ///
+    /// A `Paused` escrow — including one frozen out of `Holdback` via
+    /// `freeze_funds` — is unaffected: this only ever accepts `Holdback`, so
+    /// once an escrow is frozen it falls back to admin arbitration exactly
+    /// as before.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
+    pub fn release_expired_holdback(env: Env, delivery_id: u64) {
+        require_not_paused(&env);
+        let record = load_escrow(&env, delivery_id);
+        if record.status != EscrowStatus::Holdback {
+            panic_with_error!(&env, EscrowError::InvalidState);
+        }
+        // `mark_holdback_escrow` is the only path into `Holdback` and always
+        // sets this, but fall back to a typed rejection rather than a panic
+        // on unwrap if that invariant is ever violated.
+        let holdback_started_at = record
+            .holdback_started_at
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidState));
+        let deadline = holdback_started_at.saturating_add(get_holdback_window(&env));
+        if env.ledger().timestamp() < deadline {
+            panic_with_error!(&env, EscrowError::TimelockNotElapsed);
+        }
+        let driver = record.driver.clone();
+        let (driver_amount, platform_fee) = settle_holdback_escrow(&env, delivery_id, record);
+
+        env.events().publish(
+            (Symbol::new(&env, "holdback_expired_released"), delivery_id),
+            (driver, driver_amount, platform_fee),
+        );
+    }
 
         let fleet_management = get_fleet_management_contract(&env);
         settle_escrow_funds(&env, delivery_id, &record, fleet_management);
 
         env.events().publish(
-            (events::escrow_released(&env), delivery_id),
-            (record.driver, driver_amount, platform_fee),
+            (Symbol::new(&env, "holdback_window_updated"),),
+            (admin, new_window_seconds),
         );
+    }
+
+    /// Current holdback window (in seconds), falling back to
+    /// `DEFAULT_HOLDBACK_WINDOW_SECONDS` when the admin has never set one.
+    pub fn get_holdback_window(env: Env) -> u64 {
+        get_holdback_window(&env)
     }
 
     pub fn get_escrow(env: Env, delivery_id: u64) -> EscrowRecord {
