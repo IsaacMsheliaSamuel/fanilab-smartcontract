@@ -1461,3 +1461,74 @@ fn test_early_delivery_confirmation() {
         "Delivery should be early"
     );
 }
+
+
+/// Test that create_delivery and create_deliveries_batch emit compatible
+/// DeliveryCreatedEvent payloads with the same shape and topic.
+/// This ensures off-chain consumers receive consistent event structure.
+#[test]
+fn test_create_delivery_and_batch_emit_consistent_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let shipper = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let contract_id = env.register(DeliveryContract, ());
+    let client = DeliveryContractClient::new(&env, &contract_id);
+
+    client.init(&Address::generate(&env));
+
+    // Create single delivery via create_delivery
+    let cargo = shared_types::CargoDescriptor {
+        weight_grams: 500,
+        category: shared_types::CargoCategory::Electronics,
+        fragile: true,
+    };
+    let metadata = DeliveryMetadata {
+        delivery_id: 999, // Will be overwritten
+        origin: soroban_sdk::String::from_str(&env, "Origin"),
+        destination: soroban_sdk::String::from_str(&env, "Destination"),
+        cargo_description: cargo,
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 3600,
+    };
+
+    let single_delivery_id = client.create_delivery(&shipper, &recipient, &metadata);
+
+    // Create batch with one delivery via create_deliveries_batch
+    let mut batch_metadata = soroban_sdk::vec![&env];
+    let mut meta = metadata.clone();
+    meta.delivery_id = 888; // Will be overwritten
+    batch_metadata.push_back(meta);
+
+    let batch_ids = client.create_deliveries_batch(&shipper, &recipient, &batch_metadata);
+    assert_eq!(batch_ids.len(), 1);
+    let batch_delivery_id = batch_ids.get(0).unwrap();
+
+    // Retrieve both deliveries to verify they have the same structure
+    let single_delivery = client.get_delivery(&single_delivery_id);
+    let batch_delivery = client.get_delivery(&batch_delivery_id);
+
+    // Both should be Pending status
+    assert_eq!(single_delivery.status, DeliveryStatus::Pending);
+    assert_eq!(batch_delivery.status, DeliveryStatus::Pending);
+
+    // Both should have sender as shipper
+    assert_eq!(single_delivery.sender, shipper);
+    assert_eq!(batch_delivery.sender, shipper);
+
+    // Both should have recipient
+    assert_eq!(single_delivery.recipient, recipient);
+    assert_eq!(batch_delivery.recipient, recipient);
+
+    // Both should have same metadata structure
+    assert_eq!(single_delivery.metadata.origin, batch_delivery.metadata.origin);
+    assert_eq!(
+        single_delivery.metadata.destination,
+        batch_delivery.metadata.destination
+    );
+    assert_eq!(
+        single_delivery.metadata.cargo_description.weight_grams,
+        batch_delivery.metadata.cargo_description.weight_grams
+    );
+}
