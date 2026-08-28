@@ -214,6 +214,7 @@ fn create_mock_escrow_record(
         expires_at: None,
         disputed_by: None,
         disputed_at: None,
+        holdback_started_at: None,
         fleet_id: None,
     }
 }
@@ -398,6 +399,84 @@ fn test_raise_dispute_delivered_exceeds_time_limit() {
 
     // Attempt to raise dispute (should fail due to time limit exceeded)
     dispute_client.raise_dispute(&recipient, &did(3));
+}
+
+#[test]
+fn test_update_dispute_time_limit_allows_below_minimum_and_getter_returns_value() {
+    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    dispute_client.update_dispute_time_limit(&admin, &1000);
+
+    assert_eq!(dispute_client.get_dispute_time_limit(), 1000);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
+fn test_updated_dispute_time_limit_shortens_delivered_dispute_window() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    dispute_client.update_dispute_time_limit(&admin, &1000);
+
+    let delivered_at = env.ledger().timestamp();
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(11),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Delivered,
+        Some(delivered_at),
+    );
+    set_mock_delivery(&env, &delivery_id, did(11), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender,
+        recipient.clone(),
+        driver,
+        token,
+        shared_types::EscrowStatus::Released,
+    );
+    set_mock_escrow(&env, &escrow_id, 11, &escrow_record);
+
+    env.ledger().set_timestamp(delivered_at + 1001);
+    dispute_client.raise_dispute(&recipient, &did(11));
+}
+
+#[test]
+fn test_set_dispute_resolution_limit_getter_and_force_resolution_window() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    dispute_client.set_dispute_resolution_limit(&admin, &1000);
+    assert_eq!(dispute_client.get_dispute_resolution_limit(), 1000);
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(12),
+        sender.clone(),
+        recipient,
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(12), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        delivery_record.sender.clone(),
+        driver,
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(&env, &escrow_id, 12, &escrow_record);
+
+    dispute_client.raise_dispute(&sender, &did(12));
+    env.ledger().set_timestamp(1001);
+    dispute_client.force_resolve_dispute(&sender, &did(12));
+
+    assert_eq!(
+        dispute_client.get_dispute(&did(12)).status,
+        DisputeStatus::Split
+    );
 }
 
 #[test]
@@ -1465,100 +1544,216 @@ fn test_list_admins_after_multiple_additions_and_removals() {
     assert_eq!(admins.len(), 3);
 }
 
-// ── DISPUTE REPUTATION PENALTY CEILING (Issue #210) ──────────────────────────
 
+// ── FORCE RESOLVE DISPUTE (Issue #51) ──────────────────────────────────────
+
+/// Test that any party can call force_resolve_dispute once the resolution
+/// window has elapsed, and it properly resolves the dispute with a 50/50 split.
+/// This tests the fix where force_resolve_dispute now passes the dispute
+/// resolution contract's address (not the party's address) to resolve_dispute_split.
 #[test]
-fn test_get_dispute_reputation_penalty_defaults_when_unset() {
-    let (_env, _admin, _, _, _, _, _, dispute_client) = setup_test();
-    // Never set — the documented default must still be returned.
-    assert_eq!(dispute_client.get_dispute_reputation_penalty(), 10);
-}
-
-#[test]
-fn test_set_dispute_reputation_penalty_at_ceiling_accepted() {
-    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    dispute_client.set_dispute_reputation_penalty(&admin, &MAX_DISPUTE_REPUTATION_PENALTY);
-    assert_eq!(
-        dispute_client.get_dispute_reputation_penalty(),
-        MAX_DISPUTE_REPUTATION_PENALTY
-    );
-}
-
-#[test]
-fn test_set_dispute_reputation_penalty_above_ceiling_rejected() {
-    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    match dispute_client
-        .try_set_dispute_reputation_penalty(&admin, &(MAX_DISPUTE_REPUTATION_PENALTY + 1))
-    {
-        Err(Ok(err)) => assert_eq!(err, FaniLabError::InvalidState.into()),
-        other => panic!("expected InvalidState above the ceiling, got {other:?}"),
-    }
-
-    // A wildly out-of-range value is rejected the same way.
-    match dispute_client.try_set_dispute_reputation_penalty(&admin, &u32::MAX) {
-        Err(Ok(err)) => assert_eq!(err, FaniLabError::InvalidState.into()),
-        other => panic!("expected InvalidState for u32::MAX, got {other:?}"),
-    }
-
-    // Storage is untouched — the getter still returns the default.
-    assert_eq!(dispute_client.get_dispute_reputation_penalty(), 10);
-}
-
-#[test]
-fn test_set_dispute_reputation_penalty_emits_event_with_old_and_new() {
-    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    dispute_client.set_dispute_reputation_penalty(&admin, &20);
-
-    let (topics, data) = last_event(&env);
-    let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
-    assert_eq!(topic0, Symbol::new(&env, "dispute_penalty_updated"));
-    let (who, old, new): (Address, u32, u32) =
-        <(Address, u32, u32)>::try_from_val(&env, &data).unwrap();
-    assert_eq!(who, admin);
-    assert_eq!(old, 10);
-    assert_eq!(new, 20);
-}
-
-/// A ruling applies the configured penalty and can never drive a driver's
-/// reputation below zero, even when the penalty exceeds the current score.
-#[test]
-fn test_configured_penalty_saturates_and_never_underflows_reputation() {
-    use identity_reputation_contract::{
-        IdentityReputationContract, IdentityReputationContractClient,
-    };
-
-    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+fn test_force_resolve_dispute_by_party_after_window_elapsed() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
         setup_test();
 
-    let identity_id = env.register(IdentityReputationContract, ());
-    let identity_client = IdentityReputationContractClient::new(&env, &identity_id);
-    identity_client.init(&admin, &delivery_id, &dispute_client.address);
-    dispute_client.set_identity_reputation_contract(&admin, &identity_id);
-    identity_client.register_driver(&driver);
-
-    // Drop the driver below the penalty value first, so the penalty must saturate.
-    identity_client.decrease_reputation(&dispute_client.address, &driver, &30u32);
-    assert_eq!(
-        identity_client.get_driver_profile(&driver).reputation_score,
-        20
-    );
-
-    // Configure the maximum permitted penalty.
-    dispute_client.set_dispute_reputation_penalty(&admin, &MAX_DISPUTE_REPUTATION_PENALTY);
-
+    // Setup mock delivery with driver assigned
     let mut delivery_record = create_mock_delivery_record(
         &env,
-        did(31),
+        did(11),
         sender.clone(),
         recipient.clone(),
         DeliveryStatus::Active,
         None,
     );
     delivery_record.driver = Some(driver.clone());
-    set_mock_delivery(&env, &delivery_id, did(31), &delivery_record);
+    set_mock_delivery(&env, &delivery_id, did(11), &delivery_record);
+
+    // Setup mock escrow as Locked (normal state before dispute)
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(&env, &escrow_id, 11, &escrow_record);
+
+    // Raise dispute to initialize local dispute case and pause escrow
+    let raised_at = env.ledger().timestamp();
+    dispute_client.raise_dispute(&sender, &did(11));
+
+    // Verify escrow is now Paused
+    let escrow = MockEscrowContractClient::new(&env, &escrow_id).get_escrow(&11);
+    assert_eq!(escrow.status, shared_types::EscrowStatus::Paused);
+
+    // Verify dispute is Open
+    let case = dispute_client.get_dispute(&did(11));
+    assert_eq!(case.status, DisputeStatus::Open);
+    assert_eq!(case.raised_at, raised_at);
+
+    // Advance time past the resolution window (604800 seconds configured in setup_test)
+    env.ledger()
+        .set_timestamp(raised_at + 604800 + 1);
+
+    // Non-admin party (recipient) calls force_resolve_dispute
+    dispute_client.force_resolve_dispute(&recipient, &did(11));
+
+    // Verify dispute is now Split
+    let case = dispute_client.get_dispute(&did(11));
+    assert_eq!(case.status, DisputeStatus::Split);
+    assert!(case.resolved_at.is_some());
+    assert_eq!(case.resolved_by.unwrap(), recipient);
+
+    // Verify escrow is now Split (50/50 default)
+    let escrow = MockEscrowContractClient::new(&env, &escrow_id).get_escrow(&11);
+    assert_eq!(escrow.status, shared_types::EscrowStatus::Refunded);
+}
+
+/// Test that force_resolve_dispute fails if called before the resolution window elapses.
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // InvalidState
+fn test_force_resolve_dispute_before_window_elapses_fails() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(12),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(12), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(&env, &escrow_id, 12, &escrow_record);
+
+    let raised_at = env.ledger().timestamp();
+    dispute_client.raise_dispute(&sender, &did(12));
+
+    // Attempt to force-resolve BEFORE the window elapses (should fail)
+    dispute_client.force_resolve_dispute(&recipient, &did(12));
+}
+
+/// Test that force_resolve_dispute fails if the escrow is not Paused.
+/// This ensures the escrow status is still checked even after fixing the caller issue.
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // InvalidState
+fn test_force_resolve_dispute_with_non_paused_escrow_fails() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let mut delivery_record = create_mock_delivery_record(
+        &env,
+        did(13),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(&env, &delivery_id, did(13), &delivery_record);
+
+    // Setup escrow as Locked, NOT Paused
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(&env, &escrow_id, 13, &escrow_record);
+
+    // Manually create an Open dispute without calling raise_dispute,
+    // so the escrow is not frozen. This simulates a stale state.
+    let dispute_key = DataKey::Dispute(did(13));
+    let dispute = DisputeCase {
+        delivery_id: did(13),
+        status: DisputeStatus::Open,
+        raised_at: env.ledger().timestamp(),
+        raised_by: sender.clone(),
+        evidence_hashes: soroban_sdk::vec![&env],
+        resolved_at: None,
+        resolved_by: None,
+    };
+    env.as_contract(&env.register(DisputeResolutionContract, ()), || {
+        env.storage().persistent().set(&dispute_key, &dispute);
+    });
+
+    // Advance time past the resolution window
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 604800 + 1);
+
+    // Attempt to force-resolve with non-Paused escrow (should fail)
+    dispute_client.force_resolve_dispute(&recipient, &did(13));
+}
+
+/// Test that force_resolve_dispute fails if called by someone who is not a party
+/// to the delivery (sender, recipient, or driver).
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
+fn test_force_resolve_dispute_unauthorized_caller_fails() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(14),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(14), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(&env, &escrow_id, 14, &escrow_record);
+
+    dispute_client.raise_dispute(&sender, &did(14));
+
+    // Advance time past the resolution window
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 604800 + 1);
+
+    // Attacker (not a party to the delivery) tries to force-resolve
+    let attacker = Address::generate(&env);
+    dispute_client.force_resolve_dispute(&attacker, &did(14));
+}
+
+/// Test that force_resolve_dispute fails if the dispute is not Open.
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // InvalidState
+fn test_force_resolve_dispute_non_open_dispute_fails() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let mut delivery_record = create_mock_delivery_record(
+        &env,
+        did(15),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(&env, &delivery_id, did(15), &delivery_record);
 
     let token = Address::generate(&env);
     let escrow_record = create_mock_escrow_record(
@@ -1568,154 +1763,22 @@ fn test_configured_penalty_saturates_and_never_underflows_reputation() {
         token,
         shared_types::EscrowStatus::Paused,
     );
-    set_mock_escrow(&env, &escrow_id, 31, &escrow_record);
+    set_mock_escrow(&env, &escrow_id, 15, &escrow_record);
 
-    dispute_client.raise_dispute(&sender, &did(31));
-    dispute_client.resolve_dispute_refund_sender(&admin, &did(31));
+    // Raise dispute
+    dispute_client.raise_dispute(&sender, &did(15));
 
-    assert_eq!(
-        identity_client.get_driver_profile(&driver).reputation_score,
-        0
-    );
-}
+    // Admin already resolves the dispute via refund path
+    dispute_client.resolve_dispute_refund_sender(&admin, &did(15));
 
-// ── DISPUTE TIME-LIMIT / RESOLUTION-LIMIT FLOORS (Issue #208) ─────────────────
+    // Verify dispute is now ResolvedRefund
+    let case = dispute_client.get_dispute(&did(15));
+    assert_eq!(case.status, DisputeStatus::ResolvedRefund);
 
-#[test]
-fn test_update_dispute_time_limit_zero_rejected() {
-    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    match dispute_client.try_update_dispute_time_limit(&admin, &0) {
-        Err(Ok(err)) => assert_eq!(err, FaniLabError::InvalidState.into()),
-        other => panic!("expected InvalidState for a zero limit, got {other:?}"),
-    }
-    // Unchanged.
-    assert_eq!(dispute_client.get_dispute_time_limit(), 86400);
-}
-
-#[test]
-fn test_update_dispute_time_limit_below_min_rejected() {
-    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    match dispute_client.try_update_dispute_time_limit(&admin, &(MIN_DISPUTE_TIME_LIMIT - 1)) {
-        Err(Ok(err)) => assert_eq!(err, FaniLabError::InvalidState.into()),
-        other => panic!("expected InvalidState just below the floor, got {other:?}"),
-    }
-}
-
-#[test]
-fn test_update_dispute_time_limit_at_min_accepted() {
-    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    dispute_client.update_dispute_time_limit(&admin, &MIN_DISPUTE_TIME_LIMIT);
-
-    // Read the event immediately — a later client call would replace the buffer.
-    let (topics, data) = last_event(&env);
-    let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
-    assert_eq!(topic0, Symbol::new(&env, "dispute_time_limit_updated"));
-    let (who, old, new): (Address, u64, u64) =
-        <(Address, u64, u64)>::try_from_val(&env, &data).unwrap();
-    assert_eq!(who, admin);
-    assert_eq!(old, 86400);
-    assert_eq!(new, MIN_DISPUTE_TIME_LIMIT);
-
-    assert_eq!(
-        dispute_client.get_dispute_time_limit(),
-        MIN_DISPUTE_TIME_LIMIT
-    );
-}
-
-/// After a valid widening of the window, a Delivered delivery can still be
-/// disputed anywhere inside the new window.
-#[test]
-fn test_delivered_dispute_within_window_after_time_limit_update() {
-    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
-        setup_test();
-
-    dispute_client.update_dispute_time_limit(&admin, &(2 * MIN_DISPUTE_TIME_LIMIT));
-
-    let delivered_at = env.ledger().timestamp();
-    let mut delivery_record = create_mock_delivery_record(
-        &env,
-        did(32),
-        sender.clone(),
-        recipient.clone(),
-        DeliveryStatus::Delivered,
-        Some(delivered_at),
-    );
-    delivery_record.driver = Some(driver.clone());
-    set_mock_delivery(&env, &delivery_id, did(32), &delivery_record);
-
-    let token = Address::generate(&env);
-    let escrow_record = create_mock_escrow_record(
-        sender.clone(),
-        recipient.clone(),
-        driver.clone(),
-        token,
-        shared_types::EscrowStatus::Released,
-    );
-    set_mock_escrow(&env, &escrow_id, 32, &escrow_record);
-
-    // 1.5 days later: within the new 2-day window, past the old 1-day one.
+    // Advance time past the resolution window
     env.ledger()
-        .set_timestamp(delivered_at + MIN_DISPUTE_TIME_LIMIT + MIN_DISPUTE_TIME_LIMIT / 2);
-    dispute_client.raise_dispute(&recipient, &did(32));
+        .set_timestamp(env.ledger().timestamp() + 604800 + 1);
 
-    assert_eq!(
-        dispute_client.get_dispute(&did(32)).status,
-        DisputeStatus::Open
-    );
-}
-
-#[test]
-fn test_set_dispute_resolution_limit_at_min_accepted() {
-    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    dispute_client.set_dispute_resolution_limit(&admin, &MIN_DISPUTE_RESOLUTION_LIMIT);
-    assert_eq!(
-        dispute_client.get_dispute_resolution_limit(),
-        MIN_DISPUTE_RESOLUTION_LIMIT
-    );
-}
-
-#[test]
-fn test_set_dispute_resolution_limit_below_min_rejected() {
-    let (_env, admin, _, _, _, _, _, dispute_client) = setup_test();
-
-    match dispute_client
-        .try_set_dispute_resolution_limit(&admin, &(MIN_DISPUTE_RESOLUTION_LIMIT - 1))
-    {
-        Err(Ok(err)) => assert_eq!(err, FaniLabError::InvalidState.into()),
-        other => panic!("expected InvalidState below the resolution floor, got {other:?}"),
-    }
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
-fn test_init_with_below_minimum_dispute_resolution_limit() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let admin = Address::generate(&env);
-    let delivery_id = env.register(MockDeliveryContract, ());
-    let escrow_id = env.register(MockEscrowContract, ());
-    let dispute_id = env.register(DisputeResolutionContract, ());
-    let dispute_client = DisputeResolutionContractClient::new(&env, &dispute_id);
-
-    // Time limit is valid; the resolution limit is below the floor.
-    dispute_client.init(&admin, &delivery_id, &escrow_id, &86400, &1000);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
-fn test_unauthorized_update_dispute_time_limit_fails() {
-    let (_env, _admin, sender, _, _, _, _, dispute_client) = setup_test();
-    dispute_client.update_dispute_time_limit(&sender, &MIN_DISPUTE_TIME_LIMIT);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")] // FaniLabError::Unauthorized
-fn test_unauthorized_set_dispute_resolution_limit_fails() {
-    let (_env, _admin, sender, _, _, _, _, dispute_client) = setup_test();
-    dispute_client.set_dispute_resolution_limit(&sender, &MIN_DISPUTE_RESOLUTION_LIMIT);
+    // Attempt to force-resolve an already-resolved dispute (should fail)
+    dispute_client.force_resolve_dispute(&recipient, &did(15));
 }

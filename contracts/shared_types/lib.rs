@@ -644,6 +644,13 @@ pub struct EscrowRecord {
     pub expires_at: Option<u64>,
     pub disputed_by: Option<Address>,
     pub disputed_at: Option<u64>,
+    /// Ledger timestamp at which the escrow entered `EscrowState::Holdback`
+    /// via `mark_holdback_escrow`. `None` until then (and for escrows that
+    /// never reach `Holdback`). Used by `release_expired_holdback` to permit
+    /// a permissionless payout to the driver once the admin-configurable
+    /// holdback window has elapsed, so a passive recipient can no longer
+    /// strand driver funds indefinitely (Issue #192).
+    pub holdback_started_at: Option<u64>,
     pub fleet_id: Option<u64>,
 }
 
@@ -662,6 +669,40 @@ pub struct DriverProfile {
 pub struct UserProfile {
     pub address: Address,
     pub registered_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CargoCategory {
+    Documents,
+    Electronics,
+    Perishables,
+    Clothing,
+    General,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CargoDescriptor {
+    pub weight_grams: u32,
+    pub category: CargoCategory,
+    pub fragile: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryMetadata {
+    /// Not caller-authoritative: `delivery_contract` overwrites this with
+    /// the internally generated `DeliveryId` on every create/update call,
+    /// discarding whatever value the caller supplied. Kept as a field
+    /// (rather than removed) so a `DeliveryMetadata` read back from storage
+    /// is self-describing without a second lookup.
+    pub delivery_id: u64,
+    pub origin: String,
+    pub destination: String,
+    pub cargo_description: CargoDescriptor,
+    pub created_at: u64,
+    pub estimated_delivery: u64,
 }
 
 #[cfg(test)]
@@ -1013,6 +1054,7 @@ mod test {
             expires_at: Some(8000000),
             disputed_by: Some(disputed_by.clone()),
             disputed_at: Some(7500000),
+            holdback_started_at: Some(7200000),
             fleet_id: Some(42),
         };
 
@@ -1026,6 +1068,7 @@ mod test {
         assert_eq!(record.expires_at, Some(8000000));
         assert_eq!(record.disputed_by, Some(disputed_by));
         assert_eq!(record.disputed_at, Some(7500000));
+        assert_eq!(record.holdback_started_at, Some(7200000));
         assert_eq!(record.fleet_id, Some(42));
     }
 
@@ -1060,38 +1103,4 @@ mod test {
         assert_eq!(profile.address, address);
         assert_eq!(profile.registered_at, 2000000);
     }
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CargoCategory {
-    Documents,
-    Electronics,
-    Perishables,
-    Clothing,
-    General,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CargoDescriptor {
-    pub weight_grams: u32,
-    pub category: CargoCategory,
-    pub fragile: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeliveryMetadata {
-    /// Not caller-authoritative: `delivery_contract` overwrites this with
-    /// the internally generated `DeliveryId` on every create/update call,
-    /// discarding whatever value the caller supplied. Kept as a field
-    /// (rather than removed) so a `DeliveryMetadata` read back from storage
-    /// is self-describing without a second lookup.
-    pub delivery_id: u64,
-    pub origin: String,
-    pub destination: String,
-    pub cargo_description: CargoDescriptor,
-    pub created_at: u64,
-    pub estimated_delivery: u64,
 }

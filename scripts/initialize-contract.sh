@@ -7,6 +7,10 @@ set -e
 
 CONTRACT_NAME=$1
 NETWORK=${2:-testnet}
+# Name of the Stellar CLI identity every deploy/initialize script signs with.
+# Overridable, but the default must match the identity provisioned by
+# .github/workflows/deploy-testnet.yml and documented in docs/DEPLOYMENT.md.
+DEPLOYER_IDENTITY="${DEPLOYER_IDENTITY:-deployer}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -40,6 +44,21 @@ else
     echo "⚠️  No .env file found. Using defaults."
 fi
 
+# Verify the signing identity exists before any invoke is attempted.
+if ! stellar keys address "$DEPLOYER_IDENTITY" &> /dev/null; then
+    echo "❌ Stellar CLI identity '$DEPLOYER_IDENTITY' not found."
+    echo "   Every deploy/initialize script signs with it (--source $DEPLOYER_IDENTITY)."
+    echo "   • CI: the 'Configure deployer identity' step in"
+    echo "     .github/workflows/deploy-testnet.yml provisions it from the"
+    echo "     CONTRACT_DEPLOYER_SECRET secret (environment secret"
+    echo "     TESTNET_DEPLOYER_SECRET)."
+    echo "   • Local: create it once with"
+    echo "       stellar keys generate $DEPLOYER_IDENTITY --network $NETWORK"
+    echo "     or import an existing key with"
+    echo "       stellar keys add $DEPLOYER_IDENTITY --secret-key"
+    exit 1
+fi
+
 get_contract_id() {
     grep -o "\"$1\": *\"[^\"]*\"" "$CONTRACT_IDS_FILE" | grep -o '"[^"]*"$' | tr -d '"'
 }
@@ -61,7 +80,7 @@ case "$CONTRACT_NAME" in
         echo "Initializing Escrow Contract..."
         stellar contract invoke \
             --id "$ESCROW_ID" \
-            --source deployer \
+            --source "$DEPLOYER_IDENTITY" \
             --network "$NETWORK" \
             -- init \
             --admin "$ADMIN_ADDRESS" \
@@ -92,7 +111,7 @@ case "$CONTRACT_NAME" in
         echo "Initializing Delivery Contract..."
         stellar contract invoke \
             --id "$DELIVERY_ID" \
-            --source deployer \
+            --source "$DEPLOYER_IDENTITY" \
             --network "$NETWORK" \
             -- init \
             --admin "$ADMIN_ADDRESS" \

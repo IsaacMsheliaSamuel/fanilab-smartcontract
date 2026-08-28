@@ -61,6 +61,22 @@ const MIN_DISPUTE_RESOLUTION_LIMIT: u64 = 86400; // 1 day in seconds
 /// bounded (the original intent of issue #49).
 const MAX_EVIDENCE_HASHES_PER_PARTY: u32 = 20;
 
+fn require_escrow_not_paused(env: &Env) {
+    let escrow_contract: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::EscrowContract)
+        .unwrap_or_else(|| panic_with_error!(env, FaniLabError::NotInitialized));
+    let paused: bool = env.invoke_contract(
+        &escrow_contract,
+        &Symbol::new(env, "is_paused"),
+        soroban_sdk::vec![env],
+    );
+    if paused {
+        panic_with_error!(env, FaniLabError::ProtocolPaused);
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DisputeStatus {
@@ -437,6 +453,7 @@ impl DisputeResolutionContract {
         evidence_hash: BytesN<32>,
     ) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let dispute_key = DataKey::Dispute(delivery_id);
         let mut dispute: DisputeCase = env
@@ -500,6 +517,7 @@ impl DisputeResolutionContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn resolve_dispute_refund_sender(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -587,6 +605,7 @@ impl DisputeResolutionContract {
         sender_share_bps: u32,
     ) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -679,6 +698,7 @@ impl DisputeResolutionContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn resolve_dispute_pay_driver(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
@@ -764,19 +784,21 @@ impl DisputeResolutionContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn force_resolve_dispute(env: Env, caller: Address, delivery_id: DeliveryId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let dispute_key = DataKey::Dispute(delivery_id);
-        let mut dispute: DisputeCase = env
+        let dispute: DisputeCase = env
             .storage()
             .persistent()
             .get(&dispute_key)
             .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::DeliveryNotFound));
 
+        // Check 1: Dispute must be Open
         if dispute.status != DisputeStatus::Open {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
 
-        // Verify caller is a party to the delivery
+        // Check 2: Verify caller is a party to the delivery
         let delivery_contract_addr = Self::get_delivery_contract(env.clone());
         let delivery: shared_types::DeliveryRecord = env.invoke_contract(
             &delivery_contract_addr,
@@ -790,44 +812,51 @@ impl DisputeResolutionContract {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
-        // Verify the resolution window has elapsed
+        // Check 3: Verify the resolution window has elapsed
         let resolution_limit = Self::get_dispute_resolution_limit(env.clone());
         let current_time = env.ledger().timestamp();
         if current_time <= dispute.raised_at + resolution_limit {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
 
-        // Apply default 50/50 split
-        const DEFAULT_SENDER_SHARE_BPS: u32 = 5000;
-        dispute.status = DisputeStatus::Split;
-        dispute.resolved_at = Some(current_time);
-        dispute.resolved_by = Some(caller.clone());
-        env.storage().persistent().set(&dispute_key, &dispute);
-        env.storage().persistent().extend_ttl(
-            &dispute_key,
-            ttl::LEDGER_TTL_THRESHOLD,
-            ttl::LEDGER_TTL_EXTEND_TO,
-        );
-
+        // Check 4: Verify escrow is Paused (precondition before state mutation)
         let escrow_addr = Self::get_escrow_contract(env.clone());
         let escrow: EscrowRecord = env.invoke_contract(
             &escrow_addr,
             &Symbol::new(&env, "get_escrow"),
             soroban_sdk::vec![&env, u64::from(delivery_id).into_val(&env)],
         );
-
-        if escrow.status == EscrowStatus::Paused {
-            let _: () = env.invoke_contract(
-                &escrow_addr,
-                &Symbol::new(&env, "resolve_dispute_split"),
-                soroban_sdk::vec![
-                    &env,
-                    caller.into_val(&env),
-                    u64::from(delivery_id).into_val(&env),
-                    DEFAULT_SENDER_SHARE_BPS.into_val(&env),
-                ],
-            );
+        if escrow.status != EscrowStatus::Paused {
+            panic_with_error!(&env, FaniLabError::InvalidState);
         }
+
+        // All checks passed; now apply effects following checks-effects-interactions pattern
+        const DEFAULT_SENDER_SHARE_BPS: u32 = 5000;
+        let mut updated_dispute = dispute.clone();
+        updated_dispute.status = DisputeStatus::Split;
+        updated_dispute.resolved_at = Some(current_time);
+        updated_dispute.resolved_by = Some(caller.clone());
+        env.storage().persistent().set(&dispute_key, &updated_dispute);
+        env.storage().persistent().extend_ttl(
+            &dispute_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        // Perform external interactions
+        // Pass this contract's address as the caller so the escrow contract's
+        // require_admin check succeeds; the actual party (sender/recipient/driver)
+        // only needs to authorize this call, not the subsequent escrow call.
+        let _: () = env.invoke_contract(
+            &escrow_addr,
+            &Symbol::new(&env, "resolve_dispute_split"),
+            soroban_sdk::vec![
+                &env,
+                env.current_contract_address().into_val(&env),
+                u64::from(delivery_id).into_val(&env),
+                DEFAULT_SENDER_SHARE_BPS.into_val(&env),
+            ],
+        );
 
         env.events().publish(
             (Symbol::new(&env, "dispute_force_resolved"), delivery_id),

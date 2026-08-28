@@ -1,5 +1,6 @@
 #![no_std]
 
+use identity_reputation_contract::IdentityReputationContractClient;
 use shared_types::FaniLabError;
 use shared_types::{
     delivery_key, events, is_admin, ttl, DeliveryConfirmedEvent, DeliveryCreatedEvent,
@@ -15,16 +16,58 @@ use soroban_sdk::{
 /// Maximum deliveries per batch to stay within Soroban resource limits.
 pub const MAX_BATCH_SIZE: u32 = 100;
 
+fn require_escrow_not_paused(env: &Env) {
+    let escrow_contract: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::EscrowContract)
+        .unwrap_or_else(|| panic_with_error!(env, FaniLabError::NotInitialized));
+    let paused: bool = env.invoke_contract(
+        &escrow_contract,
+        &Symbol::new(env, "is_paused"),
+        soroban_sdk::vec![env],
+    );
+    if paused {
+        panic_with_error!(env, FaniLabError::ProtocolPaused);
+    }
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     DeliveryCounter,
     EscrowContract,
-    /// Secondary index: deliveries created by sender (Vec<DeliveryId>).
-    DeliveriesBySender(Address),
-    /// Secondary index: deliveries with recipient (Vec<DeliveryId>).
-    DeliveriesByRecipient(Address),
+    DeliveryIndex(Address, u32, u32),
+    DeliveryIndexLen(Address, u32),
     IdentityReputationContract,
+}
+
+const INDEX_PAGE: u32 = 64;
+#[rustfmt::skip]
+fn index_push(env: &Env, owner: &Address, kind: u32, id: DeliveryId) {
+    let len_key = DataKey::DeliveryIndexLen(owner.clone(), kind);
+    let len: u32 = env.storage().persistent().get(&len_key).unwrap_or(0);
+    let key = DataKey::DeliveryIndex(owner.clone(), kind, len / INDEX_PAGE);
+    let mut page: soroban_sdk::Vec<DeliveryId> = env.storage().persistent().get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    page.push_back(id);
+    env.storage().persistent().set(&key, &page);
+    env.storage().persistent().set(&len_key, &(len + 1));
+}
+
+#[rustfmt::skip]
+fn index_page(env: &Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<DeliveryId> {
+    let len: u32 = env.storage().persistent()
+        .get(&DataKey::DeliveryIndexLen(owner.clone(), kind)).unwrap_or(0);
+    let mut out = soroban_sdk::Vec::new(env);
+    let end = len.min(offset.saturating_add(limit.min(100)));
+    for i in offset.min(len)..end {
+        let page: soroban_sdk::Vec<DeliveryId> = env.storage().persistent()
+            .get(&DataKey::DeliveryIndex(owner.clone(), kind, i / INDEX_PAGE))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if let Some(id) = page.get(i % INDEX_PAGE) { out.push_back(id); }
+    }
+    out
 }
 
 #[contracterror]
@@ -39,6 +82,8 @@ pub enum DeliveryError {
     /// never valid — enforced both at assignment time and again at
     /// confirmation time as a defense-in-depth check.
     InvalidDriver = 4,
+    /// Sender and recipient must be different parties.
+    InvalidParties = 5,
 }
 
 mod constants {
@@ -157,22 +202,18 @@ impl DeliveryContract {
         metadata: DeliveryMetadata,
     ) -> DeliveryId {
         sender.require_auth();
+        require_escrow_not_paused(&env);
+
+        if sender == recipient {
+            panic_with_error!(&env, DeliveryError::InvalidParties);
+        }
 
         validate_delivery_metadata(&env, &metadata)
             .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
 
         if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
-            use soroban_sdk::IntoVal;
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, sender.clone().into_val(&env)],
-            );
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
-            );
+            ensure_user_profile(&env, &identity_contract, &sender);
+            ensure_user_profile(&env, &identity_contract, &recipient);
         }
 
         let mut counter: u64 = env
@@ -214,7 +255,9 @@ impl DeliveryContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        // Update secondary indexes.
+        index_push(&env, &sender, 0, delivery_id);
+        index_push(&env, &recipient, 1, delivery_id);
+        /* Legacy indexes.
         let sender_key = DataKey::DeliveriesBySender(sender.clone());
         let mut sender_deliveries: soroban_sdk::Vec<DeliveryId> = env
             .storage()
@@ -246,6 +289,7 @@ impl DeliveryContract {
             ttl::LEDGER_TTL_THRESHOLD,
             ttl::LEDGER_TTL_EXTEND_TO,
         );
+        */
 
         env.events().publish(
             (events::delivery_created(&env),),
@@ -259,9 +303,22 @@ impl DeliveryContract {
         delivery_id
     }
 
-    /// Create multiple deliveries in a single transaction.  Sender must authorize.
-    /// Returns Vec of created delivery IDs.  Each delivery funds escrow individually
-    /// via cross-contract calls to the escrow contract.
+    /// Create multiple deliveries in a single transaction. Sender must authorize.
+    /// Returns Vec of created delivery IDs. Each delivery is stored with Pending status
+    /// and secondary indexes are updated, but NO escrow is created.
+    ///
+    /// **IMPORTANT:** This function DOES NOT create escrows. Escrow creation is a separate,
+    /// required step: after obtaining delivery IDs from this function, call
+    /// `escrow_contract::create_escrows_batch` with the returned delivery_ids to fund
+    /// the escrows. The two operations must be paired: deliveries without escrows will
+    /// fail at driver assignment or delivery confirmation with DeliveryNotFound errors.
+    ///
+    /// **Integration Sequence:**
+    /// 1. Call `delivery_contract::create_deliveries_batch` with metadata → returns Vec<DeliveryId>
+    /// 2. Call `escrow_contract::create_escrows_batch` with (delivery_id, driver, amount) tuples
+    ///
+    /// The ordering constraint exists because delivery_ids must be known before escrows
+    /// can reference them, and `create_escrows_batch` accepts explicit delivery_ids.
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn create_deliveries_batch(
         env: Env,
@@ -270,23 +327,22 @@ impl DeliveryContract {
         metadata_list: soroban_sdk::Vec<DeliveryMetadata>,
     ) -> soroban_sdk::Vec<DeliveryId> {
         sender.require_auth();
+        require_escrow_not_paused(&env);
 
         if metadata_list.len() > MAX_BATCH_SIZE {
             panic_with_error!(&env, DeliveryError::BatchTooLarge);
         }
 
+        for i in 0..metadata_list.len() {
+            if let Some(metadata) = metadata_list.get(i) {
+                validate_delivery_metadata(&env, &metadata)
+                    .unwrap_or_else(|_| panic_with_error!(&env, DeliveryError::InvalidMetadata));
+            }
+        }
+
         if let Some(identity_contract) = Self::get_identity_reputation_contract(env.clone()) {
-            use soroban_sdk::IntoVal;
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, sender.clone().into_val(&env)],
-            );
-            let _: shared_types::UserProfile = env.invoke_contract(
-                &identity_contract,
-                &Symbol::new(&env, "register_user"),
-                soroban_sdk::vec![&env, recipient.clone().into_val(&env)],
-            );
+            ensure_user_profile(&env, &identity_contract, &sender);
+            ensure_user_profile(&env, &identity_contract, &recipient);
         }
 
         let mut result = soroban_sdk::Vec::new(&env);
@@ -298,13 +354,14 @@ impl DeliveryContract {
 
         let timestamp = env.ledger().timestamp();
 
-        // Pre-load sender and recipient indexes for efficient batch updates.
+        /* Legacy index batching.
         let sender_key = DataKey::DeliveriesBySender(sender.clone());
         let mut sender_deliveries: soroban_sdk::Vec<DeliveryId> = env
             .storage()
             .persistent()
             .get(&sender_key)
             .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+        */
 
         let recipient_key = DataKey::DeliveriesByRecipient(recipient.clone());
         let mut recipient_deliveries: soroban_sdk::Vec<DeliveryId> = env
@@ -345,19 +402,23 @@ impl DeliveryContract {
                     ttl::LEDGER_TTL_EXTEND_TO,
                 );
 
-                sender_deliveries.push_back(delivery_id);
-                recipient_deliveries.push_back(delivery_id);
+                index_push(&env, &sender, 0, delivery_id);
+                index_push(&env, &recipient, 1, delivery_id);
 
                 env.events().publish(
-                    (soroban_sdk::Symbol::new(&env, "delivery_created"),),
-                    (delivery_id, sender.clone()),
+                    (events::delivery_created(&env),),
+                    DeliveryCreatedEvent {
+                        delivery_id: delivery_id.value(),
+                        sender: sender.clone(),
+                        amount: 0,
+                    },
                 );
 
                 result.push_back(delivery_id);
             }
         }
 
-        // Save updated indexes.
+        /* Legacy index flush.
         env.storage()
             .persistent()
             .set(&sender_key, &sender_deliveries);
@@ -375,6 +436,7 @@ impl DeliveryContract {
             ttl::LEDGER_TTL_THRESHOLD,
             ttl::LEDGER_TTL_EXTEND_TO,
         );
+        */
 
         result
     }
@@ -387,6 +449,7 @@ impl DeliveryContract {
         metadata: DeliveryMetadata,
     ) {
         sender.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
@@ -428,6 +491,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn cancel_delivery(env: Env, sender: Address, delivery_id: DeliveryId) {
         sender.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
@@ -475,6 +539,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn assign_driver(env: Env, caller: Address, delivery_id: DeliveryId, driver: Address) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let is_caller_admin = is_admin(&env, &caller);
         let is_self_assignment = caller == driver;
@@ -521,6 +586,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn mark_in_transit(env: Env, driver: Address, delivery_id: DeliveryId) {
         driver.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
@@ -558,6 +624,7 @@ impl DeliveryContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn confirm_delivery(env: Env, recipient: Address, delivery_id: DeliveryId) {
         recipient.require_auth();
+        require_escrow_not_paused(&env);
 
         let key = delivery_key(delivery_id);
         let mut delivery: DeliveryRecord = env
@@ -697,17 +764,12 @@ impl DeliveryContract {
     }
 
     pub fn get_driver_profile(env: Env, driver: Address) -> DriverProfile {
-        let driver_key = StorageKey::DriverProfile(driver.clone());
-        env.storage()
-            .persistent()
-            .get(&driver_key)
-            .unwrap_or_else(|| DriverProfile {
-                address: driver,
-                deliveries_completed: 0,
-                reputation_score: 0,
-                registered_at: env.ledger().timestamp(),
-                kyc_verified: false,
-            })
+        let identity_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::IdentityReputationContract)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
+        IdentityReputationContractClient::new(&env, &identity_contract).get_driver_profile(&driver)
     }
 
     pub fn get_delivery(env: Env, delivery_id: DeliveryId) -> DeliveryRecord {
@@ -754,7 +816,9 @@ impl DeliveryContract {
             // InTransit: escrow should still be Locked
             (DeliveryStatus::InTransit, shared_types::EscrowStatus::Locked) => true,
 
-            // Delivered: escrow must be Released (funds moved to driver)
+            // Delivered: escrow can be in Holdback (post-confirmation, pre-release)
+            // or Released (after driver payout completes)
+            (DeliveryStatus::Delivered, shared_types::EscrowStatus::Holdback) => true,
             (DeliveryStatus::Delivered, shared_types::EscrowStatus::Released) => true,
 
             // Disputed: escrow must be Paused
@@ -770,11 +834,7 @@ impl DeliveryContract {
 
     /// Get all delivery IDs created by a sender.
     pub fn get_deliveries_by_sender(env: Env, sender: Address) -> soroban_sdk::Vec<DeliveryId> {
-        let key = DataKey::DeliveriesBySender(sender);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, sender, 0, 0, 100)
     }
 
     /// Get all delivery IDs with a specific recipient.
@@ -782,11 +842,12 @@ impl DeliveryContract {
         env: Env,
         recipient: Address,
     ) -> soroban_sdk::Vec<DeliveryId> {
-        let key = DataKey::DeliveriesByRecipient(recipient);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+        index_page(&env, recipient, 1, 0, 100)
+    }
+
+    #[rustfmt::skip]
+    pub fn get_deliveries_page(env: Env, owner: Address, kind: u32, offset: u32, limit: u32) -> soroban_sdk::Vec<DeliveryId> {
+        index_page(&env, owner, kind, offset, limit)
     }
 }
 

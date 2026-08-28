@@ -15,9 +15,8 @@ different contracts. An integrator handling errors from a multi-contract call ch
 needs to know which contract's enum to look the code up against. This file lists every
 enum in the workspace so any `(contract, code)` pair can be resolved in one place.
 
-Three contracts — `dispute_resolution_contract`, `identity_reputation_contract`, and
-`settlement_contract` — define no local error enum at all and raise only the shared
-`FaniLabError` below.
+Two contracts — `dispute_resolution_contract` and `identity_reputation_contract` —
+define no local error enum and raise only the shared `FaniLabError` below.
 
 ## `FaniLabError` — shared across all six contracts (`shared_types`)
 
@@ -63,6 +62,7 @@ tables when debugging an error from this contract.
 | 2 | `InvalidMetadata` | Delivery metadata fails validation (e.g. location or weight limits). |
 | 3 | `BatchTooLarge` | `create_deliveries_batch` list exceeds `MAX_BATCH_SIZE` (100). |
 | 4 | `InvalidDriver` | Driver address matches the delivery's sender or recipient. |
+| 5 | `InvalidParties` | Sender and recipient are the same address. |
 
 `delivery_contract` also raises `FaniLabError` directly (e.g. `Unauthorized`,
 `DeliveryNotFound`, `NotInitialized`).
@@ -81,12 +81,18 @@ tables when debugging an error from this contract.
 | 8 | `NoPendingTreasuryChange` | `confirm_fleet_treasury_update` called with no proposal pending. |
 | 9 | `TimelockNotElapsed` | `confirm_fleet_treasury_update` called before the proposal's timelock elapsed. |
 | 10 | `FleetInactive` | Requested operation is invalid because the fleet has been deactivated. |
+| 11 | `InvalidConfiguration` | Signer configuration contains an invalid threshold. |
+
+## `SettlementError` — `settlement_contract`
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| 1 | `SwapNotImplemented` | Settlement swaps are unavailable until the Phase 3 implementation is complete. |
 
 ## Contracts with no local error enum
 
-`dispute_resolution_contract`, `identity_reputation_contract`, and `settlement_contract`
-raise `FaniLabError` exclusively — look up any error code they return in the shared
-table above.
+`dispute_resolution_contract` and `identity_reputation_contract` raise `FaniLabError`
+exclusively — look up any error code they return in the shared table above.
 
 ## Interpreting a raw error
 

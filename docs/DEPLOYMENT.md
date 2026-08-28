@@ -175,6 +175,30 @@ export ESCROW_CONTRACT_ID=<returned_contract_id>
 # Contract IDs will be saved to contract-ids-testnet.json
 ```
 
+### CI Deployment (GitHub Actions)
+
+The **Deploy to Testnet** workflow (`.github/workflows/deploy-testnet.yml`) is
+`workflow_dispatch`-only. It runs against the `testnet` GitHub Environment and
+expects one secret:
+
+| Secret | Holds | Used by |
+| ------ | ----- | ------- |
+| `TESTNET_DEPLOYER_SECRET` | The deployer account's secret (`S...`) key | The workflow's *Configure deployer identity* step |
+
+That step imports the secret (via stdin, so it never reaches the logs) as the
+Stellar CLI identity **`deployer`** — the exact identity every deploy and
+initialize script signs with (`--source deployer`). Nothing downstream reads the
+raw secret; the scripts only ever reference the `deployer` identity.
+
+The deploy and initialize scripts abort early with actionable guidance if that
+identity is missing, so a run with an unset or blank `TESTNET_DEPLOYER_SECRET`
+fails with a clear message instead of a raw CLI error. To point the scripts at a
+differently named identity, export `DEPLOYER_IDENTITY` before invoking them.
+
+The local `.env` variable that carries this same key is `CONTRACT_DEPLOYER_SECRET`
+(see `.env.example`); it is only a convenience for humans importing the identity
+locally and is not consumed by the scripts directly.
+
 ### Deployment Order
 The contracts should be deployed in this order due to dependencies:
 
