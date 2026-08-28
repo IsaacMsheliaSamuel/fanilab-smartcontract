@@ -7,6 +7,10 @@ set -e
 
 CONTRACT_NAME=$1
 NETWORK=${2:-testnet}
+# Name of the Stellar CLI identity every deploy/initialize script signs with.
+# Overridable, but the default must match the identity provisioned by
+# .github/workflows/deploy-testnet.yml and documented in docs/DEPLOYMENT.md.
+DEPLOYER_IDENTITY="${DEPLOYER_IDENTITY:-deployer}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -62,6 +66,21 @@ if ! command -v cargo &> /dev/null; then
     exit 1
 fi
 
+if ! stellar keys address "$DEPLOYER_IDENTITY" &> /dev/null; then
+    echo "${RED}❌ Stellar CLI identity '$DEPLOYER_IDENTITY' not found.${NC}" >&2
+    echo "   Every deploy/initialize script signs with it (--source $DEPLOYER_IDENTITY)." >&2
+    echo "   • CI: the 'Configure deployer identity' step in" >&2
+    echo "     .github/workflows/deploy-testnet.yml provisions it from the" >&2
+    echo "     CONTRACT_DEPLOYER_SECRET secret (environment secret" >&2
+    echo "     TESTNET_DEPLOYER_SECRET). Make sure that secret is set for the" >&2
+    echo "     'testnet' environment." >&2
+    echo "   • Local: create it once with" >&2
+    echo "       stellar keys generate $DEPLOYER_IDENTITY --network $NETWORK" >&2
+    echo "     or import an existing key with" >&2
+    echo "       stellar keys add $DEPLOYER_IDENTITY --secret-key" >&2
+    exit 1
+fi
+
 echo "${GREEN}✓ Prerequisites OK${NC}" >&2
 echo "" >&2
 
@@ -88,7 +107,7 @@ echo "${YELLOW}Deploying $CONTRACT_NAME...${NC}" >&2
 # rather than a blob of interleaved log text.
 CONTRACT_ID=$(stellar contract deploy \
     --wasm "$WASM_PATH" \
-    --source deployer \
+    --source "$DEPLOYER_IDENTITY" \
     --network "$NETWORK")
 
 echo "${GREEN}✓ $CONTRACT_NAME deployed: $CONTRACT_ID${NC}" >&2

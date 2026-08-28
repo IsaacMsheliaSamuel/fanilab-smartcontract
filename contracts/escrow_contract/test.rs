@@ -64,6 +64,126 @@ impl MaliciousSettlementContract {
     }
 }
 
+// ── Issue #238: reentrancy coverage for the remaining cross-contract call sites
+//
+// `escrow_contract` makes cross-contract calls at four points; Issue #87 only
+// added a reentrancy regression test for the settlement-swap path. The mocks
+// and tests below extend that coverage to:
+//   * payout_driver -> fleet_management_contract::get_payout_address
+//   * payout_driver -> settlement_contract::get_driver_preference
+//   * settle_escrow_funds -> token::transfer (driver payout)
+// across release_escrow, release_holdback_escrow and resolve_dispute, plus the
+// edge case of a reentrant call attempting refund_escrow.
+//
+// Every one of these is an out-of-contract call that lands back on the escrow
+// while it is still on the call stack, so the Soroban host rejects it with
+// "Contract re-entry is not allowed". Each test additionally asserts the escrow
+// status and the token balances so that a future refactor which weakened the
+// status guard at the top of the fund-moving functions would fail on the
+// balance/state assertions even if the host guard were somehow bypassed.
+
+/// Re-enter the escrow contract on the fund-moving function and delivery id
+/// recorded in this mock's own instance storage by `arm_reentrant_mock`.
+///
+/// The Soroban host rejects the re-entry while resolving this inner call —
+/// before the target function's body, auth checks or argument validation run —
+/// so a placeholder `caller` is sufficient; only `target`/`func`/`deliv` need
+/// to be real for the assertion to be about re-entry and nothing else.
+fn reenter_escrow(env: &Env) {
+    let store = env.storage().instance();
+    let target: Address = store.get(&Symbol::new(env, "target")).unwrap();
+    let func: Symbol = store.get(&Symbol::new(env, "func")).unwrap();
+    let deliv: u64 = store.get(&Symbol::new(env, "deliv")).unwrap();
+    let caller = env.current_contract_address();
+    let _: () = env.invoke_contract(
+        &target,
+        &func,
+        soroban_sdk::vec![env, caller.into_val(env), deliv.into_val(env)],
+    );
+}
+
+/// Record, on `mock`'s own instance storage, which escrow to re-enter, which
+/// fund-moving function to call and with what delivery id — mirroring how the
+/// existing `MaliciousSettlementContract` test stores its `target`.
+fn arm_reentrant_mock(env: &Env, mock: &Address, escrow: &Address, func: &str, deliv: u64) {
+    env.as_contract(mock, || {
+        let store = env.storage().instance();
+        store.set(&Symbol::new(env, "target"), escrow);
+        store.set(&Symbol::new(env, "func"), &Symbol::new(env, func));
+        store.set(&Symbol::new(env, "deliv"), &deliv);
+    });
+}
+
+/// A malicious `fleet_management_contract` whose `get_payout_address` re-enters
+/// the escrow mid-payout.
+#[contract]
+struct MaliciousFleetContract;
+
+#[contractimpl]
+impl MaliciousFleetContract {
+    pub fn get_payout_address(env: Env, driver: Address, _fleet_id: u64) -> Address {
+        reenter_escrow(&env);
+        driver
+    }
+}
+
+/// A malicious `settlement_contract` whose `get_driver_preference` re-enters the
+/// escrow mid-payout. Returns `None` afterwards so, absent the reentry guard,
+/// the payout would fall through to a normal token transfer.
+#[contract]
+struct MaliciousPreferenceContract;
+
+#[contractimpl]
+impl MaliciousPreferenceContract {
+    pub fn get_driver_preference(env: Env, _driver: Address) -> Option<Address> {
+        reenter_escrow(&env);
+        None
+    }
+}
+
+/// A minimal token whose `transfer` re-enters the escrow the first time the
+/// escrow tries to pay *out* (i.e. `from` is the escrow contract). Inbound
+/// funding transfers (`from` == sender) are left alone.
+#[contract]
+struct ReentrantToken;
+
+fn reentrant_token_balances(env: &Env) -> soroban_sdk::Map<Address, i128> {
+    let store = env.storage().instance();
+    match store.get(&Symbol::new(env, "bal")) {
+        Some(map) => map,
+        None => soroban_sdk::Map::new(env),
+    }
+}
+
+#[contractimpl]
+impl ReentrantToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let mut bal = reentrant_token_balances(&env);
+        let current = bal.get(to.clone()).unwrap_or(0);
+        bal.set(to, current + amount);
+        let store = env.storage().instance();
+        store.set(&Symbol::new(&env, "bal"), &bal);
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        reentrant_token_balances(&env).get(id).unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        let store = env.storage().instance();
+        let target: Option<Address> = store.get(&Symbol::new(&env, "target"));
+        if target.as_ref() == Some(&from) {
+            reenter_escrow(&env);
+        }
+        let mut bal = reentrant_token_balances(&env);
+        let from_bal = bal.get(from.clone()).unwrap_or(0);
+        bal.set(from, from_bal - amount);
+        let to_bal = bal.get(to.clone()).unwrap_or(0);
+        bal.set(to, to_bal + amount);
+        store.set(&Symbol::new(&env, "bal"), &bal);
+    }
+}
+
 #[test]
 fn test_init_and_platform_fee_default() {
     let (env, contract_id) = setup_env();
@@ -1468,6 +1588,236 @@ fn test_release_escrow_rejects_reentrant_call_during_settlement_swap() {
     client.confirm_settlement_contract(&admin);
 
     client.release_escrow(&recipient, &900u64);
+}
+
+// ── Issue #238: reentrancy at the remaining cross-contract call sites ───────
+//
+// In each test the outer fund-moving call panics because the Soroban host
+// rejects the re-entrant call ("Contract re-entry is not allowed"); `result`
+// is therefore `Err`. The whole invocation then rolls back, so the follow-up
+// assertions confirm the escrow status is unchanged and no tokens moved — i.e.
+// no double release, refund or payout.
+
+#[test]
+fn test_release_escrow_rejects_reentrancy_via_fleet_get_payout_address() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &900u64,
+        &token,
+        &1000,
+        &Some(1u64),
+    );
+
+    let fleet = env.register(MaliciousFleetContract, ());
+    arm_reentrant_mock(&env, &fleet, &contract_id, "release_escrow", 900);
+    client.set_fleet_management_contract(&admin, &fleet);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.release_escrow(&recipient, &900u64);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_escrow(&900u64).status, EscrowStatus::Locked);
+    assert_eq!(balance(&env, &token, &driver), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+}
+
+#[test]
+fn test_release_holdback_escrow_rejects_reentrancy_via_fleet_get_payout_address() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &901u64,
+        &token,
+        &1000,
+        &Some(1u64),
+    );
+    client.mark_holdback_escrow(&recipient, &901u64);
+
+    let fleet = env.register(MaliciousFleetContract, ());
+    arm_reentrant_mock(&env, &fleet, &contract_id, "release_holdback_escrow", 901);
+    client.set_fleet_management_contract(&admin, &fleet);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.release_holdback_escrow(&recipient, &901u64);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_escrow(&901u64).status, EscrowStatus::Holdback);
+    assert_eq!(balance(&env, &token, &driver), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+}
+
+#[test]
+fn test_resolve_dispute_rejects_reentrancy_via_fleet_get_payout_address() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let dispute_contract = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    client.set_dispute_resolution_contract(&admin, &dispute_contract);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &902u64,
+        &token,
+        &1000,
+        &Some(1u64),
+    );
+    client.freeze_funds(&dispute_contract, &902u64);
+
+    let fleet = env.register(MaliciousFleetContract, ());
+    arm_reentrant_mock(&env, &fleet, &contract_id, "release_escrow", 902);
+    client.set_fleet_management_contract(&admin, &fleet);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.resolve_dispute(&admin, &902u64, &true);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_escrow(&902u64).status, EscrowStatus::Paused);
+    assert_eq!(balance(&env, &token, &driver), 0);
+    assert_eq!(balance(&env, &token, &sender), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+}
+
+#[test]
+fn test_release_escrow_rejects_reentrancy_via_settlement_get_driver_preference() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(&sender, &recipient, &driver, &903u64, &token, &1000, &None);
+
+    let settlement = env.register(MaliciousPreferenceContract, ());
+    arm_reentrant_mock(&env, &settlement, &contract_id, "release_escrow", 903);
+    client.set_settlement_contract(&admin, &settlement);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+    client.confirm_settlement_contract(&admin);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.release_escrow(&recipient, &903u64);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_escrow(&903u64).status, EscrowStatus::Locked);
+    assert_eq!(balance(&env, &token, &driver), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+}
+
+#[test]
+fn test_release_escrow_rejects_reentrant_refund_via_fleet_get_payout_address() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &904u64,
+        &token,
+        &1000,
+        &Some(1u64),
+    );
+
+    let fleet = env.register(MaliciousFleetContract, ());
+    // The reentrant call attempts a refund rather than a second release.
+    arm_reentrant_mock(&env, &fleet, &contract_id, "refund_escrow", 904);
+    client.set_fleet_management_contract(&admin, &fleet);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.release_escrow(&recipient, &904u64);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_escrow(&904u64).status, EscrowStatus::Locked);
+    assert_eq!(balance(&env, &token, &sender), 0);
+    assert_eq!(balance(&env, &token, &driver), 0);
+    assert_eq!(balance(&env, &token, &contract_id), 1000);
+}
+
+#[test]
+fn test_release_escrow_rejects_reentrancy_via_token_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+
+    let token = env.register(ReentrantToken, ());
+    let token_client = ReentrantTokenClient::new(&env, &token);
+    token_client.mint(&sender, &1000);
+
+    client.init(&admin, &token, &0);
+    client.create_escrow(&sender, &recipient, &driver, &905u64, &token, &1000, &None);
+
+    // Arm the token to re-enter release_escrow the first time the escrow pays out.
+    arm_reentrant_mock(&env, &token, &contract_id, "release_escrow", 905);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.release_escrow(&recipient, &905u64);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_escrow(&905u64).status, EscrowStatus::Locked);
+    assert_eq!(token_client.balance(&driver), 0);
+    assert_eq!(token_client.balance(&contract_id), 1000);
 }
 
 #[test]

@@ -189,6 +189,125 @@ fn test_tier_boundary_exact() {
     assert_eq!(tier, DriverTier::Gold);
 }
 
+// ── Issue #240: named Silver threshold + initial score, boundary coverage ───
+
+/// Register `driver` and move its reputation to exactly `target` through the
+/// public increase/decrease entry points, so tier assertions run against a
+/// real on-ledger score rather than a hand-set field.
+fn drive_score_to(
+    client: &IdentityReputationContractClient<'_>,
+    authorized: &Address,
+    driver: &Address,
+    target: u32,
+) {
+    client.register_driver(driver);
+    let start = client.get_driver_profile(driver).reputation_score;
+    if target >= start {
+        // +5 per light, non-fragile delivery; overshoot then trim the excess.
+        let mut score = start;
+        while score < target {
+            client.increase_reputation(authorized, driver, &0u64, &1000u32, &false);
+            score += 5;
+        }
+        if score > target {
+            client.decrease_reputation(authorized, driver, &(score - target));
+        }
+    } else {
+        client.decrease_reputation(authorized, driver, &(start - target));
+    }
+    assert_eq!(
+        client.get_driver_profile(driver).reputation_score,
+        target,
+        "helper failed to reach exact target score"
+    );
+}
+
+#[test]
+fn test_tier_boundary_49_is_bronze() {
+    let (env, _, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    drive_score_to(&client, &delivery_contract, &driver, 49);
+    assert_eq!(client.get_driver_tier(&driver), DriverTier::Bronze);
+}
+
+#[test]
+fn test_tier_boundary_50_is_silver() {
+    let (env, _, client, _, _) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+    // 50 is exactly SILVER_TIER_THRESHOLD and also the seeded starting score.
+    assert_eq!(client.get_driver_profile(&driver).reputation_score, 50);
+    assert_eq!(client.get_driver_tier(&driver), DriverTier::Silver);
+}
+
+#[test]
+fn test_tier_boundary_74_is_silver() {
+    let (env, _, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    drive_score_to(&client, &delivery_contract, &driver, 74);
+    assert_eq!(client.get_driver_tier(&driver), DriverTier::Silver);
+}
+
+#[test]
+fn test_tier_boundary_75_is_gold() {
+    let (env, _, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    drive_score_to(&client, &delivery_contract, &driver, 75);
+    assert_eq!(client.get_driver_tier(&driver), DriverTier::Gold);
+}
+
+#[test]
+fn test_newly_registered_driver_starts_silver() {
+    // Documents the intended policy: INITIAL_REPUTATION_SCORE is derived from
+    // SILVER_TIER_THRESHOLD, so a driver is Silver the instant they register.
+    let (env, _, client, _, _) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+    assert_eq!(client.get_driver_tier(&driver), DriverTier::Silver);
+}
+
+#[test]
+fn test_tier_edge_score_zero_is_bronze() {
+    let (env, _, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    drive_score_to(&client, &delivery_contract, &driver, 0);
+    assert_eq!(client.get_driver_tier(&driver), DriverTier::Bronze);
+}
+
+#[test]
+fn test_tier_edge_score_max_is_gold() {
+    let (env, _, client, delivery_contract, _) = setup();
+    let driver = Address::generate(&env);
+    drive_score_to(&client, &delivery_contract, &driver, 100);
+    assert_eq!(client.get_driver_tier(&driver), DriverTier::Gold);
+}
+
+#[test]
+fn test_enterprise_eligibility_agrees_with_tier_at_gold_boundary() {
+    let (env, _, client, delivery_contract, _) = setup();
+
+    let below = Address::generate(&env);
+    drive_score_to(&client, &delivery_contract, &below, 74);
+    assert_eq!(client.get_driver_tier(&below), DriverTier::Silver);
+    assert!(!client.is_eligible_for_enterprise(&below));
+
+    let at = Address::generate(&env);
+    drive_score_to(&client, &delivery_contract, &at, 75);
+    assert_eq!(client.get_driver_tier(&at), DriverTier::Gold);
+    assert!(client.is_eligible_for_enterprise(&at));
+}
+
+#[test]
+fn test_get_driver_tier_rejects_unregistered_driver() {
+    let (env, _, client, _, _) = setup();
+    let unregistered = Address::generate(&env);
+    let result = client.try_get_driver_tier(&unregistered);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::ProviderNotFound.into()),
+        _ => panic!("Expected get_driver_tier on an unregistered driver to fail"),
+    }
+}
+
 #[test]
 fn test_reputation_accumulation() {
     let (env, _, client, delivery_contract, _) = setup();
