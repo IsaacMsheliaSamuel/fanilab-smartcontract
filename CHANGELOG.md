@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: coverage upload now fails the build on error (`fail_ci_if_error: true`)
 - CI: `cargo machete` step to detect unused dependencies automatically
 - CI: `cargo outdated` step is now a hard gate (removed `continue-on-error`)
+- Release: `release.yml` now validates that the pushed `vX.Y.Z` tag matches the version declared by every workspace crate (and that the crates agree with each other) before anything is built or published; a mismatch fails the workflow with a message naming both the tag and the manifest version (#246)
+- Release: the "Contracts" list in the generated release notes is now derived from the built `*.wasm` artifacts — the same directory the checksum block is generated from — instead of a hand-maintained list, so it stays correct as workspace members are added or removed (#245)
+- CI: all four workflows now declare explicit least-privilege `permissions` blocks — `contents: write` for the release job, `contents: read` everywhere else — so they behave correctly under either a read-only or read-write default token and bound the blast radius of a compromised action (#244)
 - `identity_reputation_contract::has_driver_profile` query function for driver existence checks
 - `shared_types::ttl` constants (`LEDGER_TTL_THRESHOLD`, `LEDGER_TTL_EXTEND_TO`) now used by `delivery_contract`, `dispute_resolution_contract`, `identity_reputation_contract`, and `fleet_management_contract` instead of hand-typed `518400, 518400` literals at every `extend_ttl` call site
 - `fleet_management_contract::confirm_fleet_treasury_update` and `get_pending_treasury_update` to support a timelocked treasury change flow
@@ -28,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fleet_management_contract::update_fleet_treasury` now only *proposes* a treasury change; it takes effect only after a 3-day timelock and an explicit `confirm_fleet_treasury_update` call, giving active drivers advance notice via the new `fleet_treasury_change_proposed` event
 - `settlement_contract` source moved from `src/lib.rs` to the flat `lib.rs` layout used by the other five contracts, for structural consistency
 - Replaced the crate-level `#![allow(deprecated)]` in all six contracts with `#[allow(deprecated)]` scoped to the individual functions that call the deprecated `events().publish()`, so future unrelated deprecations are no longer silently suppressed
+- `release.yml` and `deploy-testnet.yml` now pass `--locked` to `cargo build`, matching `ci.yml`, so every build path resolves the committed `Cargo.lock` exactly (and fails instead of silently updating it if the lockfile is stale). The published WASM artifacts and their recorded checksums now correspond to the dependency set CI tested, and rebuilding a tag reproduces the same bytes (#242)
+- `escrow_contract::constants::PROTOCOL_VERSION` now carries a doc comment stating that it is deliberately independent of the crate/package version and the release tag: the crate version and tag track source/artifact history and must agree, while `PROTOCOL_VERSION` only bumps on an on-chain-observable protocol change (#246)
 - Enhanced CI pipeline with linting and testing
 - Improved error handling across all contracts
 - Optimized storage TTL management
@@ -35,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Updated WASM build target from `wasm32-unknown-unknown` to `wasm32v1-none`** for Soroban SDK 27.0.0 compatibility
 - **Pinned Rust toolchain to 1.81.0** in CI workflows for consistent compilation across environments
 - Added `#[allow(deprecated)]` annotations for SDK 27.0.0 `env.events().publish()` API deprecation (remains functional)
+
+### Fixed
+- `escrow_contract::create_escrows_batch` now increments `TotalLocked(token)` by the sum of the batch, matching `create_escrow`'s fund accounting so `sweep_untracked_balance` can no longer drain batch-created escrows as "untracked" surplus (Issue #188)
+- `escrow_contract::create_escrows_batch` now enforces the same guards as `create_escrow`: the batch token must match `ProtocolConfig::token` (`InvalidToken`) and every element amount must be positive (`InvalidAmount`) (Issue #189)
 
 ### Removed
 - **BREAKING:** `FaniLabError::EscrowLocked` (discriminant 7) and `FaniLabError::InvalidAddress` (discriminant 10) — dead error variants never returned by any contract in the workspace. Off-chain code matching on these discriminant values should be updated; the numeric codes are not reused by other variants.
