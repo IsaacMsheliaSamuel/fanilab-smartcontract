@@ -1,14 +1,38 @@
+extern crate std;
+
 use super::*;
 use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus};
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, String,
+    xdr, Address, Env, String, TryFromVal, TryIntoVal, Val,
 };
 
 fn did(value: u64) -> DeliveryId {
     DeliveryId::from(value)
+}
+
+/// Decode every published event into the `(contract, topics, data)` shape the
+/// SDK <27 `env.events().all()` returned directly. SDK 27's `ContractEvents`
+/// only exposes the raw XDR form, so tests that need to match on topics/data
+/// decode it here (mirrors the helper in `fleet_management_contract`).
+fn decoded_events(env: &Env) -> std::vec::Vec<(Address, soroban_sdk::Vec<Val>, Val)> {
+    let mut out = std::vec::Vec::new();
+    for raw in env.events().all().events().iter() {
+        let contract_id = raw.contract_id.clone().expect("event missing contract id");
+        let address: Address = xdr::ScVal::Address(xdr::ScAddress::Contract(contract_id))
+            .try_into_val(env)
+            .expect("failed to decode contract address");
+        let xdr::ContractEventBody::V0(body) = raw.body.clone();
+        let mut topics = soroban_sdk::Vec::new(env);
+        for topic in body.topics.iter() {
+            topics.push_back(Val::try_from_val(env, topic).expect("failed to decode topic"));
+        }
+        let data = Val::try_from_val(env, &body.data).expect("failed to decode event data");
+        out.push((address, topics, data));
+    }
+    out
 }
 
 #[contract]
@@ -222,9 +246,45 @@ fn test_admin_whitelist_management() {
     dispute_client.add_admin(&admin, &new_admin);
     assert!(dispute_client.is_admin(&new_admin));
 
-    // New admin removes original admin
-    dispute_client.remove_admin(&new_admin, &admin);
+    // Original admin steps down, leaving new_admin as the sole admin. A
+    // self-removal is the sanctioned way to reduce the roster to one admin
+    // (Issue #212); an admin removing a *different* admin may never leave
+    // itself alone.
+    dispute_client.remove_admin(&admin, &admin);
     assert!(!dispute_client.is_admin(&admin));
+    assert!(dispute_client.is_admin(&new_admin));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
+fn test_admin_cannot_consolidate_roster_to_self() {
+    // Issue #212: an admin must not be able to reduce the roster to only
+    // itself by removing the others.
+    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    let admin2 = Address::generate(&env);
+    dispute_client.add_admin(&admin, &admin2);
+
+    // `admin` removing `admin2` would leave `admin` as the sole admin — the
+    // self-service consolidation this guard blocks.
+    dispute_client.remove_admin(&admin, &admin2);
+}
+
+#[test]
+fn test_admin_removal_still_works_while_another_admin_remains() {
+    // Issue #212 regression: legitimate removals through the intended process
+    // still succeed as long as at least one other admin remains.
+    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    let admin2 = Address::generate(&env);
+    let admin3 = Address::generate(&env);
+    dispute_client.add_admin(&admin, &admin2);
+    dispute_client.add_admin(&admin, &admin3);
+
+    // Roster is [admin, admin2, admin3]; removing admin3 leaves two admins.
+    dispute_client.remove_admin(&admin, &admin3);
+    assert!(!dispute_client.is_admin(&admin3));
+    assert_eq!(dispute_client.list_admins().len(), 2);
 }
 
 #[test]
@@ -1045,7 +1105,9 @@ fn test_list_admins_after_removing_admin() {
 
     let new_admin = Address::generate(&env);
     dispute_client.add_admin(&admin, &new_admin);
-    dispute_client.remove_admin(&admin, &new_admin);
+    // `new_admin` steps down; reducing the roster to a single admin is only
+    // permitted via self-removal (Issue #212).
+    dispute_client.remove_admin(&new_admin, &new_admin);
 
     let admins = dispute_client.list_admins();
     assert_eq!(admins.len(), 1);
@@ -1071,4 +1133,531 @@ fn test_list_admins_after_multiple_additions_and_removals() {
     dispute_client.remove_admin(&admin2, &admin3);
     let admins = dispute_client.list_admins();
     assert_eq!(admins.len(), 3);
+}
+
+// ── Issue #211: uniform "escrow must be Paused" precondition ────────────────
+//
+// Only `resolve_dispute_split_funds` previously fetched the escrow and
+// asserted `Paused`. `resolve_dispute_refund_sender` and
+// `resolve_dispute_pay_driver` relied on `escrow_contract`'s own guard,
+// which fires only after a cross-contract reputation adjustment has been
+// attempted. All three now share `require_escrow_paused`, called before any
+// state mutation or side effect.
+
+#[contract]
+pub struct MockReputationContract;
+
+#[contractimpl]
+impl MockReputationContract {
+    fn bump(env: &Env) {
+        let k = Symbol::new(env, "calls");
+        let n: u32 = env.storage().instance().get(&k).unwrap_or(0);
+        env.storage().instance().set(&k, &(n + 1));
+    }
+
+    pub fn decrease_reputation(env: Env, _caller: Address, _subject: Address, _amount: u32) {
+        Self::bump(&env);
+    }
+
+    pub fn increase_reputation(env: Env, _caller: Address, _subject: Address, _amount: u32) {
+        Self::bump(&env);
+    }
+
+    pub fn calls(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "calls"))
+            .unwrap_or(0)
+    }
+}
+
+/// Register the dispute case for `delivery_id` and then force the mock escrow
+/// back to a non-Paused state, so a resolution entry point can be exercised
+/// against the bad precondition.
+#[allow(clippy::too_many_arguments)]
+fn open_dispute_with_non_paused_escrow(
+    env: &Env,
+    delivery_id: DeliveryId,
+    sender: &Address,
+    recipient: &Address,
+    driver: &Address,
+    delivery_contract_id: &Address,
+    escrow_contract_id: &Address,
+    dispute_client: &DisputeResolutionContractClient,
+) {
+    let mut delivery_record = create_mock_delivery_record(
+        env,
+        delivery_id,
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(env, delivery_contract_id, delivery_id, &delivery_record);
+
+    let token = Address::generate(env);
+    let locked = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(env, escrow_contract_id, u64::from(delivery_id), &locked);
+
+    // raise_dispute pauses the mock escrow via freeze_funds; reset it to
+    // Locked afterwards to exercise the non-Paused guard.
+    dispute_client.raise_dispute(sender, &delivery_id);
+    set_mock_escrow(env, escrow_contract_id, u64::from(delivery_id), &locked);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // InvalidState
+fn test_resolve_refund_sender_rejects_non_paused_escrow() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    open_dispute_with_non_paused_escrow(
+        &env,
+        did(30),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    dispute_client.resolve_dispute_refund_sender(&admin, &did(30));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // InvalidState
+fn test_resolve_pay_driver_rejects_non_paused_escrow() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    open_dispute_with_non_paused_escrow(
+        &env,
+        did(31),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    dispute_client.resolve_dispute_pay_driver(&admin, &did(31));
+}
+
+#[test]
+fn test_resolve_refund_sender_non_paused_makes_no_reputation_change() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let reputation_id = env.register(MockReputationContract, ());
+    dispute_client.set_identity_reputation_contract(&admin, &reputation_id);
+
+    open_dispute_with_non_paused_escrow(
+        &env,
+        did(32),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    let result = dispute_client.try_resolve_dispute_refund_sender(&admin, &did(32));
+    assert!(result.is_err());
+
+    // The precondition fails fast: the dispute is untouched and the
+    // reputation contract was never called.
+    assert_eq!(
+        dispute_client.get_dispute(&did(32)).status,
+        DisputeStatus::Open
+    );
+    assert_eq!(
+        MockReputationContractClient::new(&env, &reputation_id).calls(),
+        0
+    );
+}
+
+#[test]
+fn test_resolve_pay_driver_non_paused_makes_no_reputation_change() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let reputation_id = env.register(MockReputationContract, ());
+    dispute_client.set_identity_reputation_contract(&admin, &reputation_id);
+
+    open_dispute_with_non_paused_escrow(
+        &env,
+        did(33),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    let result = dispute_client.try_resolve_dispute_pay_driver(&admin, &did(33));
+    assert!(result.is_err());
+
+    assert_eq!(
+        dispute_client.get_dispute(&did(33)).status,
+        DisputeStatus::Open
+    );
+    assert_eq!(
+        MockReputationContractClient::new(&env, &reputation_id).calls(),
+        0
+    );
+}
+
+#[test]
+fn test_all_resolution_entry_points_succeed_against_paused_escrow() {
+    // Regression: the shared precondition does not break the happy path for
+    // any of the three entry points.
+    for (idx, which) in ["refund", "pay", "split"].iter().enumerate() {
+        let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+            setup_test();
+        let d = did(40 + idx as u64);
+
+        let mut delivery_record = create_mock_delivery_record(
+            &env,
+            d,
+            sender.clone(),
+            recipient.clone(),
+            DeliveryStatus::Active,
+            None,
+        );
+        delivery_record.driver = Some(driver.clone());
+        set_mock_delivery(&env, &delivery_id, d, &delivery_record);
+
+        let token = Address::generate(&env);
+        let escrow_record = create_mock_escrow_record(
+            sender.clone(),
+            recipient.clone(),
+            driver.clone(),
+            token,
+            shared_types::EscrowStatus::Paused,
+        );
+        set_mock_escrow(&env, &escrow_id, u64::from(d), &escrow_record);
+
+        dispute_client.raise_dispute(&sender, &d);
+
+        match *which {
+            "refund" => {
+                dispute_client.resolve_dispute_refund_sender(&admin, &d);
+                assert_eq!(
+                    dispute_client.get_dispute(&d).status,
+                    DisputeStatus::ResolvedRefund
+                );
+            }
+            "pay" => {
+                dispute_client.resolve_dispute_pay_driver(&admin, &d);
+                assert_eq!(
+                    dispute_client.get_dispute(&d).status,
+                    DisputeStatus::ResolvedPayout
+                );
+            }
+            _ => {
+                dispute_client.resolve_dispute_split_funds(&admin, &d, &5000);
+                assert_eq!(dispute_client.get_dispute(&d).status, DisputeStatus::Split);
+            }
+        }
+    }
+}
+
+// ── Issue #213: force_resolve_dispute coverage + overflow hardening ─────────
+
+/// Register an Open dispute for `delivery_id` backed by an Active delivery
+/// (with `driver` assigned) and a mock escrow that `raise_dispute` leaves in
+/// `Paused`. Returns the `raised_at` timestamp of the new dispute.
+#[allow(clippy::too_many_arguments)]
+fn open_dispute_for_force_resolve(
+    env: &Env,
+    delivery_id: DeliveryId,
+    sender: &Address,
+    recipient: &Address,
+    driver: &Address,
+    delivery_contract_id: &Address,
+    escrow_contract_id: &Address,
+    dispute_client: &DisputeResolutionContractClient,
+) -> u64 {
+    let mut delivery_record = create_mock_delivery_record(
+        env,
+        delivery_id,
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(env, delivery_contract_id, delivery_id, &delivery_record);
+
+    let token = Address::generate(env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Locked,
+    );
+    set_mock_escrow(
+        env,
+        escrow_contract_id,
+        u64::from(delivery_id),
+        &escrow_record,
+    );
+
+    dispute_client.raise_dispute(sender, &delivery_id);
+    dispute_client.get_dispute(&delivery_id).raised_at
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // InvalidState
+fn test_force_resolve_before_window_rejected() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    open_dispute_for_force_resolve(
+        &env,
+        did(50),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    // No time has elapsed — well within the 604800s resolution window.
+    dispute_client.force_resolve_dispute(&sender, &did(50));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // InvalidState
+fn test_force_resolve_at_window_boundary_rejected() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    let raised_at = open_dispute_for_force_resolve(
+        &env,
+        did(51),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    // Exactly at raised_at + resolution_limit: the check is `<=`, so the
+    // boundary is still rejected.
+    env.ledger().set_timestamp(raised_at + 604800);
+    dispute_client.force_resolve_dispute(&sender, &did(51));
+}
+
+#[test]
+fn test_force_resolve_after_window_proceeds() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    let raised_at = open_dispute_for_force_resolve(
+        &env,
+        did(52),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    let resolved_time = raised_at + 604800 + 1;
+    env.ledger().set_timestamp(resolved_time);
+    dispute_client.force_resolve_dispute(&sender, &did(52));
+
+    let case = dispute_client.get_dispute(&did(52));
+    assert_eq!(case.status, DisputeStatus::Split);
+    assert_eq!(case.resolved_at, Some(resolved_time));
+    assert_eq!(case.resolved_by, Some(sender.clone()));
+
+    // The Paused escrow was split-resolved (mock marks it Refunded).
+    let escrow = MockEscrowContractClient::new(&env, &escrow_id).get_escrow(&52);
+    assert_eq!(escrow.status, shared_types::EscrowStatus::Refunded);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #1)")] // Unauthorized
+fn test_force_resolve_by_non_party_rejected() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    let raised_at = open_dispute_for_force_resolve(
+        &env,
+        did(53),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+
+    env.ledger().set_timestamp(raised_at + 604800 + 1);
+    let stranger = Address::generate(&env);
+    dispute_client.force_resolve_dispute(&stranger, &did(53));
+}
+
+#[test]
+fn test_force_resolve_accepted_from_each_party() {
+    for (idx, role) in ["sender", "recipient", "driver"].iter().enumerate() {
+        let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+            setup_test();
+        let d = did(54 + idx as u64);
+        let raised_at = open_dispute_for_force_resolve(
+            &env,
+            d,
+            &sender,
+            &recipient,
+            &driver,
+            &delivery_id,
+            &escrow_id,
+            &dispute_client,
+        );
+        env.ledger().set_timestamp(raised_at + 604800 + 1);
+
+        let caller = match *role {
+            "sender" => sender.clone(),
+            "recipient" => recipient.clone(),
+            _ => driver.clone(),
+        };
+        dispute_client.force_resolve_dispute(&caller, &d);
+        assert_eq!(dispute_client.get_dispute(&d).status, DisputeStatus::Split);
+    }
+}
+
+#[test]
+fn test_force_resolve_requires_open_dispute() {
+    let (env, _admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+    let raised_at = open_dispute_for_force_resolve(
+        &env,
+        did(57),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+    env.ledger().set_timestamp(raised_at + 604800 + 1);
+
+    // First force-resolution succeeds and moves the dispute out of Open.
+    dispute_client.force_resolve_dispute(&sender, &did(57));
+
+    // A second call must be rejected on the state precondition.
+    let result = dispute_client.try_force_resolve_dispute(&recipient, &did(57));
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::InvalidState.into()),
+        _ => panic!("Expected FaniLabError::InvalidState"),
+    }
+}
+
+#[test]
+fn test_force_resolve_large_resolution_limit_does_not_panic() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    // Raise the dispute at a non-zero timestamp so `raised_at + limit` would
+    // overflow u64 without saturating arithmetic.
+    env.ledger().set_timestamp(1_000);
+    let raised_at = open_dispute_for_force_resolve(
+        &env,
+        did(58),
+        &sender,
+        &recipient,
+        &driver,
+        &delivery_id,
+        &escrow_id,
+        &dispute_client,
+    );
+    assert_eq!(raised_at, 1_000);
+
+    // `set_dispute_resolution_limit` accepts any u64 (see issue #208).
+    dispute_client.set_dispute_resolution_limit(&admin, &u64::MAX);
+    env.ledger().set_timestamp(2_000);
+
+    // With `saturating_add`, `raised_at + u64::MAX` clamps to u64::MAX and the
+    // deadline check simply rejects the call instead of panicking on overflow.
+    let result = dispute_client.try_force_resolve_dispute(&sender, &did(58));
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::InvalidState.into()),
+        _ => panic!("Expected FaniLabError::InvalidState (not an arithmetic overflow)"),
+    }
+}
+
+// ── Issue #212: admin roster events ───────────────────────────────────────
+
+/// Assert that the most recent event published by `contract` has `topic`
+/// as its first topic and `(caller, affected)` as its data payload. The SDK
+/// 27 test env only retains events from the last top-level invocation, so
+/// this is checked immediately after each roster call.
+fn assert_roster_event(
+    env: &Env,
+    contract: &Address,
+    topic: &str,
+    caller: &Address,
+    affected: &Address,
+) {
+    let events = decoded_events(env);
+    let (cid, topics, data) = events.last().cloned().expect("no event was published");
+    assert_eq!(&cid, contract, "event came from an unexpected contract");
+    let topic0: Symbol = Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(topic0, Symbol::new(env, topic), "unexpected event topic");
+    let (evt_caller, evt_affected): (Address, Address) =
+        <(Address, Address)>::try_from_val(env, &data).unwrap();
+    assert_eq!(&evt_caller, caller, "event does not identify the caller");
+    assert_eq!(
+        &evt_affected, affected,
+        "event does not identify the affected admin"
+    );
+}
+
+#[test]
+fn test_add_and_remove_admin_emit_roster_events() {
+    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
+    let new_admin = Address::generate(&env);
+    let third_admin = Address::generate(&env);
+
+    dispute_client.add_admin(&admin, &new_admin);
+    assert_roster_event(
+        &env,
+        &dispute_client.address,
+        "admin_added",
+        &admin,
+        &new_admin,
+    );
+
+    dispute_client.add_admin(&admin, &third_admin);
+    assert_roster_event(
+        &env,
+        &dispute_client.address,
+        "admin_added",
+        &admin,
+        &third_admin,
+    );
+
+    // Roster is [admin, new_admin, third_admin]; removing third_admin still
+    // leaves two admins, so the consolidation guard does not fire.
+    dispute_client.remove_admin(&new_admin, &third_admin);
+    assert_roster_event(
+        &env,
+        &dispute_client.address,
+        "admin_removed",
+        &new_admin,
+        &third_admin,
+    );
 }

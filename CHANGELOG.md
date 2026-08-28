@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `escrow_contract::clear_fleet_management_contract(admin)` — admin-gated, mirrors `clear_settlement_contract`: unsets a configured fleet-management contract so `get_fleet_management_contract` returns `None` and payouts for fleet-linked escrows go directly to the driver; a no-op that still succeeds when nothing is configured (Issue #239). No `clear_dispute_resolution_contract` counterpart is provided — clearing it would permanently disable `freeze_funds`; the documented remedy is to repoint via `set_dispute_resolution_contract` (decision recorded in `docs/API.md`)
+- `dispute_resolution_contract`: `add_admin` / `remove_admin` now emit `admin_added` / `admin_removed` events carrying `(caller, affected_admin)` so roster changes are observable on-chain (Issue #212)
+- Full test module for `dispute_resolution_contract::force_resolve_dispute` — timing boundaries (before / exactly at / after the resolution window), authorization for each delivery party and a non-party, the open-dispute precondition, populated `resolved_at`/`resolved_by`, and a near-`u64::MAX` resolution limit that no longer overflows (Issue #213)
+- Regression tests that `resolve_dispute_refund_sender` and `resolve_dispute_pay_driver` reject a non-`Paused` escrow before any state mutation or reputation adjustment, plus coverage that all three resolution entry points still succeed against a `Paused` escrow (Issue #211)
 - Production-ready CI/CD pipeline with security audits
 - CI: coverage upload now fails the build on error (`fail_ci_if_error: true`)
 - CI: `cargo machete` step to detect unused dependencies automatically
@@ -28,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fleet_management_contract::update_fleet_treasury` now only *proposes* a treasury change; it takes effect only after a 3-day timelock and an explicit `confirm_fleet_treasury_update` call, giving active drivers advance notice via the new `fleet_treasury_change_proposed` event
 - `settlement_contract` source moved from `src/lib.rs` to the flat `lib.rs` layout used by the other five contracts, for structural consistency
 - Replaced the crate-level `#![allow(deprecated)]` in all six contracts with `#[allow(deprecated)]` scoped to the individual functions that call the deprecated `events().publish()`, so future unrelated deprecations are no longer silently suppressed
+- `dispute_resolution_contract::remove_admin` now rejects a removal that would leave the caller as the sole remaining admin; reducing the roster to a single admin is permitted only via self-removal, so one admin key can no longer consolidate the roster to itself one call at a time (Issue #212). The existing last-admin protection is unchanged
+- `dispute_resolution_contract::resolve_dispute_refund_sender` and `resolve_dispute_pay_driver` now assert the linked escrow is `Paused` up front, via a shared `require_escrow_paused` helper also used by `resolve_dispute_split_funds`, so a bad-state call fails fast with `InvalidState` before any reputation adjustment instead of several calls deep in `escrow_contract` (Issue #211)
+- `dispute_resolution_contract::force_resolve_dispute` computes its deadline with `saturating_add` instead of unchecked `+`, so a large configured `dispute_resolution_limit` can no longer overflow `u64` and turn the deadline check into an unconditional panic (Issue #213)
 - Enhanced CI pipeline with linting and testing
 - Improved error handling across all contracts
 - Optimized storage TTL management

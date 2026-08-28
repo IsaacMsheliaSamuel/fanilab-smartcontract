@@ -510,6 +510,30 @@ impl EscrowContract {
         get_fleet_management_contract(&env)
     }
 
+    /// Issue #239: allow an admin to unset a previously configured
+    /// fleet_management_contract, mirroring `clear_settlement_contract`.
+    /// After clearing, `get_fleet_management_contract` returns `None` and the
+    /// `if let (Some(fleet_addr), Some(fid))` guard in `payout_driver` falls
+    /// through, so payouts for fleet-linked escrows go directly to the driver
+    /// instead of routing through a cross-contract `get_payout_address` call.
+    /// Clearing when nothing is configured is a no-op that still succeeds,
+    /// matching `clear_settlement_contract`.
+    ///
+    /// Decision on `set_dispute_resolution_contract` (per issue #239): no
+    /// `clear_dispute_resolution_contract` is provided. `freeze_funds` pins
+    /// its caller to the configured dispute contract and reads that address
+    /// via `NotInitialized`-on-absent, so unsetting it would permanently
+    /// disable the protocol's ability to freeze a suspicious escrow. The
+    /// intended remedy for a bad dispute contract is to repoint it with
+    /// `set_dispute_resolution_contract`, not to remove the integration.
+    pub fn clear_fleet_management_contract(env: Env, admin: Address) {
+        admin.require_auth();
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .remove(&DataKey::FleetManagementContract);
+    }
+
     pub fn set_dispute_resolution_contract(env: Env, admin: Address, dispute_contract: Address) {
         admin.require_auth();
         require_admin(&env, &admin);
