@@ -451,6 +451,52 @@ fn test_unauthorized_caller_cannot_decrease_reputation() {
     }
 }
 
+// ── FLAT REPUTATION AWARD (Issue #207) ───────────────────────────────────────
+
+/// `award_reputation` adds a flat point value without deriving it from cargo
+/// attributes and without incrementing `deliveries_completed`.
+#[test]
+fn test_award_reputation_is_flat_and_not_a_completion() {
+    let (env, _, client, _, dispute_contract) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
+    client.award_reputation(&dispute_contract, &driver, &5u32);
+
+    let profile = client.get_driver_profile(&driver);
+    assert_eq!(profile.reputation_score, 55);
+    assert_eq!(profile.deliveries_completed, 0);
+}
+
+/// A flat award is still capped at `MAX_REPUTATION` (100).
+#[test]
+fn test_award_reputation_respects_upper_bound() {
+    let (env, _, client, _, dispute_contract) = setup();
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
+    for _ in 0..20 {
+        client.award_reputation(&dispute_contract, &driver, &10u32);
+    }
+
+    assert_eq!(client.get_driver_profile(&driver).reputation_score, 100);
+}
+
+/// Only an allowlisted contract may call `award_reputation`.
+#[test]
+fn test_unauthorized_caller_cannot_award_reputation() {
+    let (env, _, client, _, _) = setup();
+    let random = Address::generate(&env);
+    let driver = Address::generate(&env);
+    client.register_driver(&driver);
+
+    let result = client.try_award_reputation(&random, &driver, &5u32);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected unauthorized award_reputation to fail with Unauthorized"),
+    }
+}
+
 #[test]
 fn test_init_already_initialized_rejected() {
     let env = Env::default();

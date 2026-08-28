@@ -13,11 +13,53 @@ use soroban_sdk::{
 const DEFAULT_DISPUTE_REPUTATION_PENALTY: u32 = 10;
 const DISPUTE_REPUTATION_REWARD: u32 = 5;
 const DISPUTE_REPUTATION_SPLIT_PENALTY: u32 = 5;
+
+/// Mirror of `identity_reputation_contract::MAX_REPUTATION` (the score ceiling,
+/// currently 100). The dispute contract cannot import that crate without taking
+/// a dependency on it, so the value is duplicated here as a documented constant;
+/// the two must be kept in sync if the reputation ceiling ever changes.
+const IDENTITY_MAX_REPUTATION: u32 = 100;
+
+/// Upper bound for the admin-configurable dispute reputation penalty.
+///
+/// Without a ceiling a single mistyped configuration value (e.g. `100` instead
+/// of `10`) turns every subsequent adverse ruling into a permanent reset of the
+/// driver's reputation to zero. Half of `IDENTITY_MAX_REPUTATION` is the most a
+/// single ruling may ever remove.
+const MAX_DISPUTE_REPUTATION_PENALTY: u32 = IDENTITY_MAX_REPUTATION / 2;
+
+// Compile-time sanity checks: every reputation adjustment this contract can
+// apply — the fixed constants and the default penalty — must sit within the
+// same ceiling enforced on the configurable penalty, which in turn must sit
+// within the reputation score ceiling itself. A future edit that violates one
+// of these fails the build rather than shipping a silently unsafe value.
+#[allow(clippy::assertions_on_constants)]
+const _: () = {
+    assert!(MAX_DISPUTE_REPUTATION_PENALTY <= IDENTITY_MAX_REPUTATION);
+    assert!(DEFAULT_DISPUTE_REPUTATION_PENALTY <= MAX_DISPUTE_REPUTATION_PENALTY);
+    assert!(DISPUTE_REPUTATION_REWARD <= MAX_DISPUTE_REPUTATION_PENALTY);
+    assert!(DISPUTE_REPUTATION_SPLIT_PENALTY <= MAX_DISPUTE_REPUTATION_PENALTY);
+};
+
 const MIN_DISPUTE_TIME_LIMIT: u64 = 86400; // 1 day in seconds
-/// Maximum number of evidence hashes a single dispute may accumulate.
-/// Without a cap, add_evidence_hash lets any party grow one storage entry
-/// without bound, inflating that entry's rent/TTL-extension cost indefinitely.
-const MAX_EVIDENCE_HASHES: u32 = 20;
+
+/// Lower bound for the dispute *resolution* window (the delay before any party
+/// may `force_resolve_dispute`). Mirrors `MIN_DISPUTE_TIME_LIMIT`: parties must
+/// always have at least a day to reach a verdict before the automatic fallback
+/// split can be forced. No upper bound is imposed — an over-long window only
+/// delays a safety-valve fallback and creates no attack surface for the trusted
+/// admin, so bounding it further would add friction without protection.
+const MIN_DISPUTE_RESOLUTION_LIMIT: u64 = 86400; // 1 day in seconds
+
+/// Maximum number of evidence hashes a single party may attach to one dispute.
+///
+/// The cap is enforced *per submitting party* rather than as one shared budget:
+/// a shared cap let any one party exhaust it with duplicate/junk hashes and
+/// permanently lock the counterparty out of recording evidence. With at most
+/// three authorized parties (sender, recipient, driver) the hard per-dispute
+/// ceiling is `3 * MAX_EVIDENCE_HASHES_PER_PARTY`, so storage growth stays
+/// bounded (the original intent of issue #49).
+const MAX_EVIDENCE_HASHES_PER_PARTY: u32 = 20;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +70,17 @@ pub enum DisputeStatus {
     Split,
 }
 
+/// A single piece of evidence attached to a dispute, recorded together with the
+/// party that submitted it. Storing the submitter (rather than a bare hash)
+/// makes the per-party quota enforceable and gives an on-chain audit trail of
+/// who supplied which hash.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceEntry {
+    pub submitter: Address,
+    pub hash: BytesN<32>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisputeCase {
@@ -35,7 +88,10 @@ pub struct DisputeCase {
     pub status: DisputeStatus,
     pub raised_at: u64,
     pub raised_by: Address,
-    pub evidence_hashes: Vec<BytesN<32>>,
+    // Pre-mainnet: this stored type changed from `Vec<BytesN<32>>` to carry the
+    // submitter. No migration path is provided because no production records
+    // exist yet.
+    pub evidence_hashes: Vec<EvidenceEntry>,
     pub resolved_at: Option<u64>,
     pub resolved_by: Option<Address>,
 }
@@ -71,6 +127,9 @@ impl DisputeResolutionContract {
             panic_with_error!(&env, FaniLabError::AlreadyInitialized);
         }
         if dispute_time_limit < MIN_DISPUTE_TIME_LIMIT {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+        if dispute_resolution_limit < MIN_DISPUTE_RESOLUTION_LIMIT {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
         env.storage()
@@ -206,14 +265,26 @@ impl DisputeResolutionContract {
             .unwrap_or(0)
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn set_dispute_reputation_penalty(env: Env, caller: Address, penalty: u32) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
+        // A penalty at or above the reputation ceiling would zero any driver's
+        // score on a single ruling; bound it to a documented fraction of that
+        // ceiling and reject anything larger loudly.
+        if penalty > MAX_DISPUTE_REPUTATION_PENALTY {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+        let old_penalty = Self::get_dispute_reputation_penalty(env.clone());
         env.storage()
             .instance()
             .set(&DataKey::DisputeReputationPenalty, &penalty);
+        env.events().publish(
+            (Symbol::new(&env, "dispute_penalty_updated"),),
+            (caller, old_penalty, penalty),
+        );
     }
 
     pub fn get_dispute_reputation_penalty(env: Env) -> u32 {
@@ -235,6 +306,12 @@ impl DisputeResolutionContract {
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
+        // Same floor init enforces: never let the resolution window drop below
+        // one day, or a dispute could be force-resolved out from under the
+        // parties before they have any chance to reach a verdict.
+        if new_limit < MIN_DISPUTE_RESOLUTION_LIMIT {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
         env.storage()
             .instance()
             .set(&DataKey::DisputeResolutionLimit, &new_limit);
@@ -246,12 +323,19 @@ impl DisputeResolutionContract {
         if !Self::is_admin(env.clone(), caller.clone()) {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
+        // The one-day floor is an invariant, not just a construction-time check:
+        // enforce it here too, or an admin could set it to 0 and close the
+        // post-delivery dispute window for every delivery in a single call.
+        if new_limit < MIN_DISPUTE_TIME_LIMIT {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+        let old_limit = Self::get_dispute_time_limit(env.clone());
         env.storage()
             .instance()
             .set(&DataKey::DisputeTimeLimit, &new_limit);
         env.events().publish(
             (Symbol::new(&env, "dispute_time_limit_updated"),),
-            (caller, new_limit),
+            (caller, old_limit, new_limit),
         );
     }
 
@@ -379,11 +463,27 @@ impl DisputeResolutionContract {
             panic_with_error!(&env, FaniLabError::Unauthorized);
         }
 
-        if dispute.evidence_hashes.len() >= MAX_EVIDENCE_HASHES {
+        // Enforce the cap per submitting party, and reject a hash this party has
+        // already submitted. A shared cap let one party fill the whole budget
+        // with duplicate/junk hashes and lock the counterparty out for the life
+        // of the dispute; a per-party quota removes that race entirely.
+        let mut party_count: u32 = 0;
+        for entry in dispute.evidence_hashes.iter() {
+            if entry.submitter == caller {
+                if entry.hash == evidence_hash {
+                    panic_with_error!(&env, FaniLabError::InvalidState);
+                }
+                party_count += 1;
+            }
+        }
+        if party_count >= MAX_EVIDENCE_HASHES_PER_PARTY {
             panic_with_error!(&env, FaniLabError::LimitExceeded);
         }
 
-        dispute.evidence_hashes.push_back(evidence_hash.clone());
+        dispute.evidence_hashes.push_back(EvidenceEntry {
+            submitter: caller.clone(),
+            hash: evidence_hash.clone(),
+        });
         env.storage().persistent().set(&dispute_key, &dispute);
         env.storage().persistent().extend_ttl(
             &dispute_key,
@@ -618,7 +718,12 @@ impl DisputeResolutionContract {
             ],
         );
 
-        // Increase driver reputation when they are vindicated
+        // Award the driver a flat reputation credit when they are vindicated.
+        // This uses `award_reputation`, not `increase_reputation`: a dispute
+        // ruling is not a delivery completion, so it must not increment
+        // `deliveries_completed` (that would double-count if the delivery is
+        // later confirmed) and must not derive points from cargo attributes.
+        // The reputation contract caps the resulting score at its maximum.
         let delivery_contract_addr = Self::get_delivery_contract(env.clone());
         let delivery: shared_types::DeliveryRecord = env.invoke_contract(
             &delivery_contract_addr,
@@ -633,7 +738,7 @@ impl DisputeResolutionContract {
             {
                 let _: () = env.invoke_contract(
                     &reputation_addr,
-                    &Symbol::new(&env, "increase_reputation"),
+                    &Symbol::new(&env, "award_reputation"),
                     soroban_sdk::vec![
                         &env,
                         env.current_contract_address().into_val(&env),

@@ -164,6 +164,10 @@ pub mod events {
         Symbol::new(env, "reputation_decreased")
     }
 
+    pub fn reputation_awarded(env: &Env) -> Symbol {
+        Symbol::new(env, "reputation_awarded")
+    }
+
     // Protocol/admin lifecycle events. These previously used raw inline
     // Symbol::new(&env, "PascalCase") calls at each contract's call site
     // instead of going through this module, the one place in the codebase
@@ -481,6 +485,15 @@ pub struct ReputationDecreasedEvent {
     /// Driver address whose reputation was decreased.
     pub driver: Address,
     /// Points deducted from the driver's reputation score.
+    pub points: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationAwardedEvent {
+    /// Driver address that received a flat reputation award.
+    pub driver: Address,
+    /// Points added to the driver's reputation score (post-cap value may be lower).
     pub points: u32,
 }
 
