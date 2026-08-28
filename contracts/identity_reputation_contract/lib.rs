@@ -89,12 +89,15 @@ impl IdentityReputationContract {
 
         // Register the initial two authorized contracts through the allowlist so
         // they can be revoked or rotated later without a contract migration.
-        env.storage()
-            .persistent()
-            .set(&DataKey::AuthorizedContract(delivery_contract), &true);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AuthorizedContract(dispute_contract), &true);
+        for contract_addr in [delivery_contract, dispute_contract] {
+            let key = DataKey::AuthorizedContract(contract_addr);
+            env.storage().persistent().set(&key, &true);
+            env.storage().persistent().extend_ttl(
+                &key,
+                ttl::LEDGER_TTL_THRESHOLD,
+                ttl::LEDGER_TTL_EXTEND_TO,
+            );
+        }
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -117,6 +120,11 @@ impl IdentityReputationContract {
         let key = DataKey::AuthorizedContract(contract_addr);
         if authorized {
             env.storage().persistent().set(&key, &true);
+            env.storage().persistent().extend_ttl(
+                &key,
+                ttl::LEDGER_TTL_THRESHOLD,
+                ttl::LEDGER_TTL_EXTEND_TO,
+            );
         } else {
             env.storage().persistent().remove(&key);
         }
@@ -179,7 +187,16 @@ impl IdentityReputationContract {
 
     pub fn is_authorized_contract(env: Env, contract_addr: Address) -> bool {
         let key = DataKey::AuthorizedContract(contract_addr);
-        env.storage().persistent().get(&key).unwrap_or(false)
+        if env.storage().persistent().get(&key).unwrap_or(false) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                ttl::LEDGER_TTL_THRESHOLD,
+                ttl::LEDGER_TTL_EXTEND_TO,
+            );
+            true
+        } else {
+            false
+        }
     }
 
     pub fn has_driver_profile(env: Env, driver: Address) -> bool {

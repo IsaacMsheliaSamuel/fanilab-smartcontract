@@ -889,6 +889,40 @@ fn test_configure_signers_adds_multiple_signers() {
 }
 
 #[test]
+fn test_signer_threshold_is_enforced_for_fleet_actions() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+    let pending_driver = Address::generate(&env);
+    let active_driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &pending_driver);
+    client.add_driver_to_fleet(&owner, &fleet_id, &active_driver);
+    client.accept_fleet_invite(&fleet_id, &active_driver);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(owner.clone());
+    signers.push_back(signer2);
+    client.configure_signers(&owner, &fleet_id, &signers, &2u32);
+
+    let new_treasury = Address::generate(&env);
+    assert!(client
+        .try_update_fleet_treasury(&owner, &fleet_id, &new_treasury)
+        .is_err());
+    assert!(client
+        .try_add_driver_to_fleet(&owner, &fleet_id, &Address::generate(&env))
+        .is_err());
+    assert!(client
+        .try_cancel_invite(&owner, &fleet_id, &pending_driver)
+        .is_err());
+    assert!(client
+        .try_remove_driver_from_fleet(&fleet_id, &owner, &active_driver)
+        .is_err());
+}
+
+#[test]
 fn test_configure_signers_unauthorized_not_owner() {
     let (env, client, _admin) = setup_test();
 
