@@ -45,6 +45,39 @@ fn test_register_driver() {
 }
 
 #[test]
+fn test_register_user_and_get_profile() {
+    let (env, _, client, _, _) = setup();
+    let user = Address::generate(&env);
+
+    let registered = client.register_user(&user);
+    let profile = client.get_user_profile(&user);
+
+    assert_eq!(registered, profile);
+    assert_eq!(profile.address, user);
+}
+
+#[test]
+fn test_register_user_is_idempotent() {
+    let (env, _, client, _, _) = setup();
+    let user = Address::generate(&env);
+
+    let first = client.register_user(&user);
+    let second = client.register_user(&user);
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn test_has_driver_profile() {
+    let (env, _, client, _, _) = setup();
+    let driver = Address::generate(&env);
+
+    assert!(!client.has_driver_profile(&driver));
+    client.register_driver(&driver);
+    assert!(client.has_driver_profile(&driver));
+}
+
+#[test]
 fn test_register_driver_duplicate() {
     let (env, _, client, _, _) = setup();
     let driver = Address::generate(&env);
