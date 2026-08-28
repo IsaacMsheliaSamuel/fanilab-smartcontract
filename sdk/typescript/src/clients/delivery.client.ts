@@ -2,17 +2,19 @@
  * Typed SDK client for DeliveryContract
  */
 
-import { Contract } from '@stellar/stellar-sdk';
 import * as DeliveryTypes from '../types/delivery.types';
 import { ContractInvokeOptions } from '../types/common.types';
+import { ContractInvoker, address, bool, map, string, symbol, u32, u64 } from './invoker';
 
 export class DeliveryClient {
-  private contract: Contract;
-  private contractId: string;
+  private readonly invoker: ContractInvoker;
+  private identityInvoker?: ContractInvoker;
 
-  constructor(contractId: string) {
-    this.contractId = contractId;
-    this.contract = new Contract(contractId);
+  constructor(contractId: string, options: ContractInvokeOptions = {}) {
+    this.invoker = new ContractInvoker(contractId, options);
+    if (options.identityContractId) {
+      this.identityInvoker = new ContractInvoker(options.identityContractId, options);
+    }
   }
 
   /**
@@ -23,7 +25,17 @@ export class DeliveryClient {
     identityContractId: string,
     options?: ContractInvokeOptions
   ): Promise<void> {
-    console.log('init', escrowContractId, identityContractId);
+    const admin = options?.sourceAccount;
+    if (!admin) {
+      throw new Error('Delivery initialization requires options.sourceAccount as admin');
+    }
+    this.identityInvoker = new ContractInvoker(identityContractId, options);
+    await this.invoker.call('init', [address(admin), address(escrowContractId)], options);
+    await this.invoker.call(
+      'set_identity_reputation_contract',
+      [address(admin), address(identityContractId)],
+      options
+    );
   }
 
   /**
@@ -33,8 +45,19 @@ export class DeliveryClient {
     params: DeliveryTypes.CreateDeliveryParams,
     options?: ContractInvokeOptions
   ): Promise<bigint> {
-    console.log('createDelivery', params);
-    return BigInt(0);
+    const metadata = map([
+      ['delivery_id', u64(params.deliveryId)],
+      ['origin', string(params.metadata.pickupLocation ?? '')],
+      ['destination', string(params.metadata.dropoffLocation ?? '')],
+      ['cargo_description', map([
+        ['weight_grams', u32(1)],
+        ['category', symbol('General')],
+        ['fragile', bool(false)],
+      ])],
+      ['created_at', u64(Math.floor(Date.now() / 1000))],
+      ['estimated_delivery', u64(Math.floor(Date.now() / 1000) + (params.metadata.estimatedDistance ?? 0))],
+    ]);
+    return BigInt(String(await this.invoker.call('create_delivery', [address(params.sender), address(params.recipient), metadata], options)));
   }
 
   /**
@@ -44,7 +67,7 @@ export class DeliveryClient {
     params: DeliveryTypes.AssignDriverParams,
     options?: ContractInvokeOptions
   ): Promise<void> {
-    console.log('assignDriver', params);
+    await this.invoker.call('assign_driver', [address(params.caller), u64(params.deliveryId), address(params.driver)], options);
   }
 
   /**
@@ -54,7 +77,7 @@ export class DeliveryClient {
     params: DeliveryTypes.ConfirmDeliveryParams,
     options?: ContractInvokeOptions
   ): Promise<void> {
-    console.log('confirmDelivery', params);
+    await this.invoker.call('confirm_delivery', [address(params.caller), u64(params.deliveryId)], options);
   }
 
   /**
@@ -64,7 +87,7 @@ export class DeliveryClient {
     params: DeliveryTypes.CancelDeliveryParams,
     options?: ContractInvokeOptions
   ): Promise<void> {
-    console.log('cancelDelivery', params);
+    await this.invoker.call('cancel_delivery', [address(params.caller), u64(params.deliveryId)], options);
   }
 
   /**
@@ -74,68 +97,95 @@ export class DeliveryClient {
     params: DeliveryTypes.MarkInTransitParams,
     options?: ContractInvokeOptions
   ): Promise<void> {
-    console.log('markInTransit', params);
+    await this.invoker.call('mark_in_transit', [address(params.caller), u64(params.deliveryId)], options);
   }
 
   /**
    * Get a delivery record
    */
-  async getDelivery(deliveryId: bigint): Promise<DeliveryTypes.DeliveryRecord> {
-    console.log('getDelivery', deliveryId);
-    return {} as DeliveryTypes.DeliveryRecord;
+  async getDelivery(deliveryId: bigint, options?: ContractInvokeOptions): Promise<DeliveryTypes.DeliveryRecord> {
+    return decodeDelivery(await this.invoker.call('get_delivery', [u64(deliveryId)], options));
   }
 
   /**
    * Get the escrow contract address
    */
-  async getEscrowContract(): Promise<string | null> {
-    return null;
+  async getEscrowContract(options?: ContractInvokeOptions): Promise<string | null> {
+    return decodeOptional(await this.invoker.call('get_escrow_contract', [], options));
   }
 
   /**
    * Get the identity contract address
    */
-  async getIdentityContract(): Promise<string | null> {
-    return null;
+  async getIdentityContract(options?: ContractInvokeOptions): Promise<string | null> {
+    return decodeOptional(await this.invoker.call('get_identity_reputation_contract', [], options));
   }
 
   /**
    * Check if a driver is registered
    */
   async isDriverRegistered(driver: string): Promise<boolean> {
-    console.log('isDriverRegistered', driver);
-    return false;
+    return Boolean(await this.identity().call('has_driver_profile', [address(driver)], undefined));
   }
 
   /**
    * Check if a user is registered
    */
   async isUserRegistered(user: string): Promise<boolean> {
-    console.log('isUserRegistered', user);
-    return false;
+    try {
+      await this.identity().call('get_user_profile', [address(user)], undefined);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
    * Get all deliveries for a sender
    */
   async getDeliveriesBySender(sender: string): Promise<bigint[]> {
-    console.log('getDeliveriesBySender', sender);
-    return [];
+    return decodeIds(await this.invoker.call('get_deliveries_by_sender', [address(sender)], undefined));
   }
 
   /**
    * Get all deliveries for a recipient
    */
   async getDeliveriesByRecipient(recipient: string): Promise<bigint[]> {
-    console.log('getDeliveriesByRecipient', recipient);
-    return [];
+    return decodeIds(await this.invoker.call('get_deliveries_by_recipient', [address(recipient)], undefined));
   }
 
   /**
    * Get all deliveries for a driver
    */
   async getDeliveriesByDriver(driver: string): Promise<bigint[]> {
-    console.log('getDeliveriesByDriver', driver);
-    return [];
+    throw new Error('DeliveryContract does not expose get_deliveries_by_driver');
   }
+
+  private identity(): ContractInvoker {
+    if (!this.identityInvoker) {
+      throw new Error('Identity contract is not configured');
+    }
+    return this.identityInvoker;
+  }
+}
+
+function decodeOptional(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function decodeIds(value: unknown): bigint[] {
+  return (value as unknown[]).map((id) => BigInt(String(id)));
+}
+
+function decodeDelivery(value: unknown): DeliveryTypes.DeliveryRecord {
+  const record = value as Record<string, unknown>;
+  const metadata = record.metadata as Record<string, unknown>;
+  return {
+    deliveryId: BigInt(String(record.delivery_id)), sender: String(record.sender), recipient: String(record.recipient),
+    driver: record.driver === null ? undefined : String(record.driver), status: record.status as DeliveryTypes.DeliveryRecord['status'],
+    metadata: {
+      pickupLocation: String(metadata.origin), dropoffLocation: String(metadata.destination),
+    }, createdAt: Number(record.created_at), deliveredAt: record.delivered_at === null ? undefined : Number(record.delivered_at),
+    transitStartedAt: record.transit_started_at === null ? undefined : Number(record.transit_started_at),
+  };
 }

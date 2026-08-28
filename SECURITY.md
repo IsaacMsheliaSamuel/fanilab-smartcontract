@@ -99,6 +99,31 @@ If you discover a critical security vulnerability:
 - No orphaned state possible
 - Atomic operations
 
+### Release & Supply-Chain Integrity
+- **Least-privilege CI.** All four GitHub Actions workflows declare explicit
+  `permissions` blocks: the release job gets `contents: write` (the minimum
+  `softprops/action-gh-release` needs to create a release and upload assets),
+  every other job gets `contents: read`. This keeps releases working under a
+  read-only default token and bounds what a compromised third-party action can
+  reach.
+- **Locked dependency resolution.** Every `cargo` invocation across CI, release,
+  and testnet deploy uses `--locked`, so published WASM artifacts and their
+  recorded SHA256 checksums are built from exactly the dependency set the test
+  suite validated, and rebuilding a tag is reproducible.
+- **Version-consistency guard.** `release.yml` refuses to build or publish when
+  the pushed `vX.Y.Z` tag disagrees with the version declared by the workspace
+  crates (or when the crates disagree with each other).
+
+### Version Identifiers
+The project uses three distinct version numbers; they are intentionally not the
+same thing:
+
+| Identifier | Where | Meaning |
+|------------|-------|---------|
+| Crate / package version | `contracts/*/Cargo.toml` | Source + published-artifact history. All workspace crates share one value. |
+| Release tag (`vX.Y.Z`) | git tags → GitHub Releases | The user-facing name of a published artifact set. Must equal the crate version (CI-enforced, minus the `v`). |
+| `PROTOCOL_VERSION` | `escrow_contract::constants` | On-chain data/behaviour contract exposed via `get_protocol_version()`. Bumps only on an on-chain-observable protocol change, independently of crate releases. |
+
 ## Audit History
 
 | Date | Auditor | Version | Report | Status |

@@ -22,6 +22,24 @@ pub const MAX_ROSTER_SIZE: u32 = 10000;
 /// their future payouts are redirected (Issue #70).
 pub const TREASURY_CHANGE_TIMELOCK_SECONDS: u64 = 3 * 24 * 60 * 60; // 3 days
 
+fn require_escrow_not_paused(env: &Env) {
+    let Some(escrow_contract) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::EscrowContract)
+    else {
+        return;
+    };
+    let paused: bool = env.invoke_contract(
+        &escrow_contract,
+        &Symbol::new(env, "is_paused"),
+        soroban_sdk::vec![env],
+    );
+    if paused {
+        panic_with_error!(env, shared_types::FaniLabError::ProtocolPaused);
+    }
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -36,6 +54,7 @@ pub enum FleetError {
     NoPendingTreasuryChange = 8,
     TimelockNotElapsed = 9,
     FleetInactive = 10,
+    InvalidConfiguration = 11,
 }
 
 #[contracttype]
@@ -60,7 +79,9 @@ pub struct FleetProfile {
     pub signature_threshold: u32,
     /// Whether the fleet is currently operating. Set to `false` by
     /// `deactivate_fleet` (Issue #108); a deactivated fleet rejects new
-    /// driver invitations and no longer receives driver payouts.
+    /// driver invitations and is not selected for new driver payouts. Payout
+    /// destinations for existing escrows are fixed when those escrows are
+    /// created.
     pub active: bool,
 }
 
@@ -79,14 +100,16 @@ pub struct PendingTreasuryChange {
 pub enum DataKey {
     /// Instance key — optional address of the identity_reputation_contract.
     IdentityContract,
+    /// Instance key — address of the escrow contract used for pause checks.
+    EscrowContract,
     /// Persistent key — monotonically incrementing fleet counter.
     FleetCounter,
     /// Persistent key — fleet profile keyed by fleet id.
     Fleet(FleetId),
     /// Persistent key — driver's status within a fleet (Pending | Active).
     DriverFleet(FleetId, Address),
-    /// Persistent key — roster of drivers (addresses) in a fleet, for enumeration.
-    FleetRoster(FleetId),
+    /// Persistent key — one active roster entry, keyed by fleet and index.
+    FleetRoster(FleetId, u32),
     /// Persistent key — pending, not-yet-confirmed treasury change for a fleet.
     PendingTreasury(FleetId),
 }
@@ -124,6 +147,16 @@ impl FleetManagementContract {
             .set(&DataKey::IdentityContract, &identity_contract);
     }
 
+    pub fn set_escrow_contract(env: Env, admin: Address, escrow_contract: Address) {
+        admin.require_auth();
+        if !is_admin(&env, &admin) {
+            panic_with_error!(&env, FleetError::Unauthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::EscrowContract, &escrow_contract);
+    }
+
     // ── Issue #67 — register_fleet ────────────────────────────────────────────
 
     /// Register a new fleet, designating an owner and a treasury wallet.
@@ -134,6 +167,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn register_fleet(env: Env, owner: Address, treasury: Address) -> FleetId {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         // Bump and persist the fleet counter.
         let counter_key = DataKey::FleetCounter;
@@ -224,6 +258,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn deactivate_fleet(env: Env, caller: Address, fleet_id: FleetId) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let fleet_key = DataKey::Fleet(fleet_id);
         let mut profile: FleetProfile = env
@@ -390,6 +425,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn update_fleet_treasury(env: Env, owner: Address, fleet_id: FleetId, treasury: Address) {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         let profile: FleetProfile = env
             .storage()
@@ -397,19 +433,7 @@ impl FleetManagementContract {
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        let mut authorized_signer_count = 0u32;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == owner {
-                    authorized_signer_count += 1;
-                    break;
-                }
-            }
-        }
-
-        if authorized_signer_count == 0 {
-            panic_with_error!(&env, FleetError::Unauthorized);
-        }
+        require_signer_threshold(&env, &profile, &owner);
 
         let activates_at = env
             .ledger()
@@ -447,6 +471,7 @@ impl FleetManagementContract {
     /// finalization pattern.
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn confirm_fleet_treasury_update(env: Env, fleet_id: FleetId) {
+        require_escrow_not_paused(&env);
         let pending_key = DataKey::PendingTreasury(fleet_id);
         let pending: PendingTreasuryChange = env
             .storage()
@@ -507,6 +532,7 @@ impl FleetManagementContract {
     #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn add_driver_to_fleet(env: Env, caller: Address, fleet_id: FleetId, driver: Address) {
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         let profile: FleetProfile = env
             .storage()
@@ -518,19 +544,7 @@ impl FleetManagementContract {
             panic_with_error!(&env, FleetError::FleetInactive);
         }
 
-        let mut is_authorized_signer = false;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == caller {
-                    is_authorized_signer = true;
-                    break;
-                }
-            }
-        }
-
-        if !is_authorized_signer {
-            panic_with_error!(&env, FleetError::Unauthorized);
-        }
+        require_signer_threshold(&env, &profile, &caller);
 
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
 
@@ -579,6 +593,7 @@ impl FleetManagementContract {
     /// accepted, clearing the slot so the driver can be re-invited immediately.
     pub fn cancel_invite(env: Env, owner: Address, fleet_id: FleetId, driver: Address) {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         let profile: FleetProfile = env
             .storage()
@@ -586,19 +601,7 @@ impl FleetManagementContract {
             .get(&DataKey::Fleet(fleet_id))
             .unwrap_or_else(|| panic_with_error!(&env, FleetError::FleetNotFound));
 
-        let mut is_authorized_signer = false;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == owner {
-                    is_authorized_signer = true;
-                    break;
-                }
-            }
-        }
-
-        if !is_authorized_signer {
-            panic_with_error!(&env, FleetError::Unauthorized);
-        }
+        require_signer_threshold(&env, &profile, &owner);
 
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
         let status: DriverFleetStatus = env
@@ -623,6 +626,7 @@ impl FleetManagementContract {
     pub fn accept_fleet_invite(env: Env, fleet_id: FleetId, driver: Address) {
         // Driver must authorise.
         driver.require_auth();
+        require_escrow_not_paused(&env);
 
         // Verify the fleet exists.
         let mut profile: FleetProfile = env
@@ -646,6 +650,11 @@ impl FleetManagementContract {
             DriverFleetStatus::Removed => panic_with_error!(&env, FleetError::InviteNotFound),
         }
 
+        // Guard against unbounded roster growth before changing membership state.
+        if profile.total_active_drivers >= MAX_ROSTER_SIZE {
+            panic_with_error!(&env, FleetError::FleetNotFound);
+        }
+
         // Promote driver to active.
         env.storage()
             .persistent()
@@ -666,39 +675,15 @@ impl FleetManagementContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        // Add driver to fleet roster for enumeration.
-        let roster_key = DataKey::FleetRoster(fleet_id);
-        let mut roster: soroban_sdk::Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&roster_key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
-
-        // Guard against unbounded roster growth.
-        if roster.len() >= MAX_ROSTER_SIZE {
-            panic_with_error!(&env, FleetError::FleetNotFound);
-        }
-
-        // Avoid duplicate roster entries: check if driver already in roster.
-        let mut already_in_roster = false;
-        for i in 0..roster.len() {
-            if let Some(existing) = roster.get(i) {
-                if existing == driver {
-                    already_in_roster = true;
-                    break;
-                }
-            }
-        }
-
-        if !already_in_roster {
-            roster.push_back(driver.clone());
-            env.storage().persistent().set(&roster_key, &roster);
-            env.storage().persistent().extend_ttl(
-                &roster_key,
-                ttl::LEDGER_TTL_THRESHOLD,
-                ttl::LEDGER_TTL_EXTEND_TO,
-            );
-        }
+        // Add the driver as one indexed roster entry. The previous active
+        // count is the next free roster index.
+        let roster_key = DataKey::FleetRoster(fleet_id, profile.total_active_drivers - 1);
+        env.storage().persistent().set(&roster_key, &driver);
+        env.storage().persistent().extend_ttl(
+            &roster_key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
 
         // Emit event.
         env.events().publish(
@@ -725,21 +710,12 @@ impl FleetManagementContract {
 
         // The caller must sign this transaction.
         caller.require_auth();
+        require_escrow_not_paused(&env);
 
         // Verify caller is authorised: must be either an authorized signer or the driver.
-        let mut is_authorized_signer = false;
-        for i in 0..profile.signers.len() {
-            if let Some(signer) = profile.signers.get(i) {
-                if signer == caller {
-                    is_authorized_signer = true;
-                    break;
-                }
-            }
-        }
-
         let is_driver = caller == driver;
-        if !is_authorized_signer && !is_driver {
-            panic_with_error!(&env, FleetError::Unauthorized);
+        if !is_driver {
+            require_signer_threshold(&env, &profile, &caller);
         }
 
         let invite_key = DataKey::DriverFleet(fleet_id, driver.clone());
@@ -767,30 +743,43 @@ impl FleetManagementContract {
             ttl::LEDGER_TTL_EXTEND_TO,
         );
 
-        // Remove driver from fleet roster.
-        let roster_key = DataKey::FleetRoster(fleet_id);
-        if let Some(roster) = env
-            .storage()
-            .persistent()
-            .get::<_, soroban_sdk::Vec<Address>>(&roster_key)
-        {
-            let mut new_roster = soroban_sdk::Vec::new(&env);
-            for i in 0..roster.len() {
-                if let Some(existing) = roster.get(i) {
-                    if existing != driver {
-                        new_roster.push_back(existing);
-                    }
+        // Remove the driver from the indexed roster and compact the remaining
+        // entries so enumeration stays contiguous without rewriting one large value.
+        if status == DriverFleetStatus::Active {
+            let roster_len = profile.total_active_drivers + 1;
+            let mut removed_index = None;
+            for index in 0..roster_len {
+                let roster_key = DataKey::FleetRoster(fleet_id, index);
+                if env
+                    .storage()
+                    .persistent()
+                    .get::<_, Address>(&roster_key)
+                    .is_some_and(|existing| existing == driver)
+                {
+                    removed_index = Some(index);
+                    break;
                 }
             }
-            if !new_roster.is_empty() {
-                env.storage().persistent().set(&roster_key, &new_roster);
-                env.storage().persistent().extend_ttl(
-                    &roster_key,
-                    ttl::LEDGER_TTL_THRESHOLD,
-                    ttl::LEDGER_TTL_EXTEND_TO,
-                );
-            } else {
-                env.storage().persistent().remove(&roster_key);
+
+            if let Some(index) = removed_index {
+                for next_index in index..(roster_len - 1) {
+                    let next_key = DataKey::FleetRoster(fleet_id, next_index + 1);
+                    let current_key = DataKey::FleetRoster(fleet_id, next_index);
+                    let next_driver: Address = env
+                        .storage()
+                        .persistent()
+                        .get(&next_key)
+                        .unwrap();
+                    env.storage().persistent().set(&current_key, &next_driver);
+                    env.storage().persistent().extend_ttl(
+                        &current_key,
+                        ttl::LEDGER_TTL_THRESHOLD,
+                        ttl::LEDGER_TTL_EXTEND_TO,
+                    );
+                }
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::FleetRoster(fleet_id, roster_len - 1));
             }
         }
 
@@ -843,14 +832,27 @@ impl FleetManagementContract {
             .get(&DataKey::DriverFleet(fleet_id, driver))
     }
 
-    /// Return the roster of all drivers (both Pending and Active) for a fleet.
-    /// Returns an empty Vec if no drivers are in the fleet.
+    /// Return the roster of all active drivers for a fleet.
+    /// Returns an empty Vec if no drivers are active in the fleet.
     pub fn get_fleet_roster(env: Env, fleet_id: FleetId) -> soroban_sdk::Vec<Address> {
-        let roster_key = DataKey::FleetRoster(fleet_id);
-        env.storage()
+        let mut roster = soroban_sdk::Vec::new(&env);
+        let active_count = env
+            .storage()
             .persistent()
-            .get(&roster_key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+            .get::<_, FleetProfile>(&DataKey::Fleet(fleet_id))
+            .map(|profile| profile.total_active_drivers)
+            .unwrap_or(0);
+
+        for index in 0..active_count {
+            if let Some(driver) = env
+                .storage()
+                .persistent()
+                .get::<_, Address>(&DataKey::FleetRoster(fleet_id, index))
+            {
+                roster.push_back(driver);
+            }
+        }
+        roster
     }
 
     /// Configure multi-signature requirements for a fleet.
@@ -865,6 +867,7 @@ impl FleetManagementContract {
         threshold: u32,
     ) {
         owner.require_auth();
+        require_escrow_not_paused(&env);
 
         let mut profile: FleetProfile = env
             .storage()
@@ -877,7 +880,7 @@ impl FleetManagementContract {
         }
 
         if threshold == 0 || threshold > signers.len() {
-            panic_with_error!(&env, FleetError::Unauthorized);
+            panic_with_error!(&env, FleetError::InvalidConfiguration);
         }
 
         profile.signers = signers;

@@ -7,6 +7,7 @@ export enum EscrowStatus {
   Holdback = 'Holdback',
   Released = 'Released',
   Refunded = 'Refunded',
+  Paused = 'Paused',
   Split = 'Split',
 }
 
@@ -63,8 +64,15 @@ export const ErrorCodes = {
   ProtocolPaused: 11,
 };
 
+import { Keypair } from '@stellar/stellar-sdk';
+
 export interface ContractInvokeOptions {
   networkPassphrase?: string;
   serverUrl?: string;
   timeout?: number;
+  timeoutSeconds?: number;
+  fee?: string;
+  sourceAccount?: string;
+  signer?: Keypair;
+  identityContractId?: string;
 }

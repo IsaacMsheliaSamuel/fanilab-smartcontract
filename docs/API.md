@@ -42,7 +42,7 @@ These indexes are automatically maintained by the respective contracts and are b
 - `get_escrows_by_driver(driver: Address) -> Vec<u64>` — all escrow delivery IDs for driver
 
 **Fleet Management Contract:**
-- `get_fleet_roster(fleet_id: FleetId) -> Vec<Address>` — all drivers in a fleet
+- `get_fleet_roster(fleet_id: FleetId) -> Vec<Address>` — active drivers in a fleet
 
 ### Interim: Event-Replay Indexing
 
@@ -443,12 +443,13 @@ Retrieve full escrow record.
 - `DeliveryNotFound` - No escrow for this delivery
 
 #### `create_escrows_batch`
-Create multiple escrows in a single transaction (up to 100 per batch).
+Create multiple escrows in a single transaction (up to 100 per batch). Enforces
+the same token and amount validation as `create_escrow`.
 
 **Parameters:**
 - `sender: Address` - Sender funding all escrows
 - `recipient: Address` - Delivery recipient (shared for all)
-- `token: Address` - Token for all escrows
+- `token: Address` - Token for all escrows; must match the protocol-configured token
 - `escrow_list: Vec<(u64, Address, i128)>` — tuples of (delivery_id, driver, amount)
 
 **Authorization:** Sender
@@ -456,10 +457,14 @@ Create multiple escrows in a single transaction (up to 100 per batch).
 **Returns:** `u32` — count of escrows created
 
 **Errors:**
+- `InvalidToken` - Token does not match the protocol-configured token
+- `InvalidAmount` - Any element's amount is not positive
 - `DuplicateDelivery` - Escrow already exists for any delivery_id
 - `InvalidState` - Batch size exceeds 100
 
 **Events:** `escrow_funded` (once per escrow)
+
+> **IMPORTANT — Integration Requirement:** This function is designed to pair with `delivery_contract::create_deliveries_batch`. The delivery IDs passed in `escrow_list` must have been created by `create_deliveries_batch` first. Call this function after receiving delivery IDs from the batch delivery creation, passing (delivery_id, driver, amount) tuples for each delivery that needs escrow backing.
 
 #### `get_escrows_by_sender`
 Get all escrow delivery IDs initiated by a sender.
@@ -712,6 +717,13 @@ Create multiple deliveries in a single transaction (up to 100 per batch).
 - Stores delivery records with Pending status
 - Updates secondary indexes for sender and recipient
 
+> **IMPORTANT — Integration Requirement:** This function creates delivery records only; it does NOT create escrows. Escrow creation must be performed as a separate operation using `escrow_contract::create_escrows_batch`. The two operations must be paired in sequence:
+>
+> 1. Call `create_deliveries_batch` → returns `Vec<DeliveryId>`
+> 2. Call `escrow_contract::create_escrows_batch` with the returned delivery IDs and (driver, amount) pairs
+>
+> Deliveries without escrows will fail at driver assignment or confirmation stages with `DeliveryNotFound` errors. The ordering constraint exists because delivery IDs must be known before escrows can reference them.
+
 #### `get_deliveries_by_sender`
 Get all delivery IDs initiated by a sender.
 
@@ -769,6 +781,14 @@ pub enum DisputeStatus {
 }
 ```
 
+#### `EvidenceEntry`
+```rust
+pub struct EvidenceEntry {
+    pub submitter: Address,     // Party that submitted this hash
+    pub hash:      BytesN<32>,  // SHA-256 hash of the evidence document/image
+}
+```
+
 #### `DisputeCase`
 ```rust
 pub struct DisputeCase {
@@ -776,7 +796,9 @@ pub struct DisputeCase {
     pub status:          DisputeStatus,
     pub raised_at:       u64,
     pub raised_by:       Address,
-    pub evidence_hashes: Vec<BytesN<32>>,
+    pub evidence_hashes: Vec<EvidenceEntry>,  // recorded with the submitting party
+    pub resolved_at:     Option<u64>,
+    pub resolved_by:     Option<Address>,
 }
 ```
 
@@ -789,12 +811,14 @@ Initialize the dispute resolution contract.
 - `admin: Address` - Initial admin address
 - `delivery_contract: Address` - Address of the delivery contract
 - `escrow_contract: Address` - Address of the escrow contract
-- `dispute_time_limit: u64` - Seconds after delivery within which a dispute may be raised
+- `dispute_time_limit: u64` - Seconds after delivery within which a dispute may be raised (must be ≥ `MIN_DISPUTE_TIME_LIMIT`, 1 day)
+- `dispute_resolution_limit: u64` - Seconds a dispute may stay `Open` before any party may `force_resolve_dispute` (must be ≥ `MIN_DISPUTE_RESOLUTION_LIMIT`, 1 day)
 
 **Authorization:** Contract deployer
 
 **Errors:**
 - `AlreadyInitialized` - Contract has already been initialized
+- `InvalidState` - `dispute_time_limit` or `dispute_resolution_limit` is below its floor
 
 ### Admin Operations
 
@@ -921,21 +945,22 @@ Open a dispute for an active, in-transit, or recently delivered delivery.
 Attach a SHA-256 evidence hash to an open dispute.
 
 **Parameters:**
-- `caller: Address` - Sender or recipient submitting evidence
+- `caller: Address` - Sender, recipient, or driver submitting evidence
 - `delivery_id: DeliveryId` - Delivery identifier
 - `evidence_hash: BytesN<32>` - SHA-256 hash of the evidence document/image
 
-**Authorization:** Delivery sender or recipient
+**Authorization:** Delivery sender, recipient, or driver
 
 **Errors:**
 - `DeliveryNotFound` - No dispute exists for this delivery
-- `InvalidState` - Dispute is not in `Open` status
-- `Unauthorized` - Caller is neither sender nor recipient
+- `InvalidState` - Dispute is not in `Open` status, or the calling party has already submitted this exact hash
+- `Unauthorized` - Caller is not a party to the delivery
+- `LimitExceeded` - The calling party has reached its per-party quota of 20 evidence hashes for this dispute
 
 **Events:** `evidence_added`
 
 **State Changes:**
-- Appends `evidence_hash` to `DisputeCase.evidence_hashes`
+- Appends `EvidenceEntry { submitter: caller, hash: evidence_hash }` to `DisputeCase.evidence_hashes`. The 20-hash cap is enforced **per submitting party**, so one party can neither exhaust another's quota nor lock the counterparty out.
 
 #### `resolve_dispute_refund_sender`
 Admin verdict: full refund to sender. Applies a reputation penalty to the driver.
@@ -1521,6 +1546,14 @@ Retrieve a user's profile.
 **Errors:**
 - `ProviderNotFound` - User profile does not exist
 
+#### `has_user_profile`
+Check whether a user profile exists.
+
+**Parameters:**
+- `user: Address` - User address
+
+**Returns:** `bool`
+
 ### Reputation Management
 
 #### `increase_reputation`
@@ -1584,6 +1617,39 @@ identity_contract.decrease_reputation(
     &dispute_contract,
     &driver,
     10u32  // deduct 10 points
+);
+```
+
+#### `award_reputation`
+Add a flat reputation credit to a driver — used when a dispute is resolved in the
+driver's favour. Unlike `increase_reputation`, this does **not** derive points
+from cargo attributes and does **not** increment `deliveries_completed` (a dispute
+ruling is not a delivery completion, and counting it as one would double-count if
+the delivery is later confirmed).
+
+**Parameters:**
+- `caller: Address` - Must be the delivery contract or dispute contract
+- `driver: Address` - Driver whose score is being credited
+- `points: u32` - Number of reputation points to add
+
+**Authorization:** Delivery contract or dispute contract only
+
+**Errors:**
+- `Unauthorized` - Caller is not an authorized contract
+- `ProviderNotFound` - Driver profile does not exist
+
+**Events:** `reputation_awarded`
+
+**State Changes:**
+- Increases `reputation_score` by `points`, capped at 100
+- Leaves `deliveries_completed` unchanged
+
+**Example:**
+```rust
+identity_contract.award_reputation(
+    &dispute_contract,
+    &driver,
+    5u32  // flat dispute reward
 );
 ```
 
