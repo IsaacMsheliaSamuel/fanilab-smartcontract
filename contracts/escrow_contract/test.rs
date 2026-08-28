@@ -4098,3 +4098,143 @@ fn test_resolve_dispute_split_requires_admin_when_no_dispute_contract() {
     let attacker = Address::generate(&env);
     client.resolve_dispute_split(&attacker, &501u64, &5000);
 }
+
+// ── Issue #239: clear_fleet_management_contract tests ───────────────────────
+
+/// Minimal fleet-management stand-in: `payout_driver` calls
+/// `get_payout_address` and routes the driver's earnings to whatever address
+/// it returns. Here that is a fixed "treasury" address stored under the
+/// `treasury` key, distinct from the driver, so a test can tell whether the
+/// fleet integration was consulted.
+#[contract]
+struct MockFleetManagementContract;
+
+#[contractimpl]
+impl MockFleetManagementContract {
+    pub fn get_payout_address(env: Env, _driver: Address, _fleet_id: u64) -> Address {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "treasury"))
+            .unwrap()
+    }
+}
+
+#[test]
+fn test_clear_fleet_management_contract_reverts_to_none() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let fleet_contract = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_fleet_management_contract(&admin, &fleet_contract);
+    assert_eq!(client.get_fleet_management_contract(), Some(fleet_contract));
+
+    client.clear_fleet_management_contract(&admin);
+    assert_eq!(client.get_fleet_management_contract(), None);
+}
+
+#[test]
+fn test_clear_nonexistent_fleet_management_contract_succeeds() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    client.init(&admin, &token, &0);
+    assert_eq!(client.get_fleet_management_contract(), None);
+
+    // Clearing when nothing is configured is a no-op that still succeeds,
+    // matching `clear_settlement_contract`.
+    client.clear_fleet_management_contract(&admin);
+    assert_eq!(client.get_fleet_management_contract(), None);
+}
+
+#[test]
+fn test_clear_fleet_management_contract_non_admin_rejected() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+    let fleet_contract = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    client.init(&admin, &token, &0);
+    client.set_fleet_management_contract(&admin, &fleet_contract);
+
+    let result = client.try_clear_fleet_management_contract(&attacker);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::Unauthorized.into()),
+        _ => panic!("Expected FaniLabError::Unauthorized"),
+    }
+
+    // The configured address is untouched by the rejected call.
+    assert_eq!(client.get_fleet_management_contract(), Some(fleet_contract));
+}
+
+#[test]
+fn test_clear_fleet_management_contract_reverts_payout_to_direct_transfer() {
+    let (env, contract_id) = setup_env();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = setup_token(&env, &token_admin);
+
+    let fleet_contract = env.register(MockFleetManagementContract, ());
+    env.as_contract(&fleet_contract, || {
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "treasury"), &treasury);
+    });
+
+    client.init(&admin, &token, &0);
+    mint(&env, &token, &sender, 1000);
+    client.set_fleet_management_contract(&admin, &fleet_contract);
+
+    // First escrow: fleet contract configured -> driver earnings routed to the
+    // fleet treasury.
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &701u64,
+        &token,
+        &400,
+        &Some(9u64),
+    );
+    client.release_escrow(&recipient, &701u64);
+    assert_eq!(balance(&env, &token, &treasury), 400);
+    assert_eq!(balance(&env, &token, &driver), 0);
+
+    // Clear the integration, then a second fleet-linked escrow pays the driver
+    // directly because `get_fleet_management_contract` is now None and
+    // `payout_driver`'s fleet guard falls through.
+    client.clear_fleet_management_contract(&admin);
+    assert_eq!(client.get_fleet_management_contract(), None);
+
+    client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &702u64,
+        &token,
+        &600,
+        &Some(9u64),
+    );
+    client.release_escrow(&recipient, &702u64);
+    assert_eq!(balance(&env, &token, &driver), 600);
+    assert_eq!(balance(&env, &token, &treasury), 400);
+    assert_eq!(client.get_escrow(&702u64).status, EscrowStatus::Released);
+}

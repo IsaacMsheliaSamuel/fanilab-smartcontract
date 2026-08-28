@@ -162,6 +162,50 @@ Configure settlement contract for currency swaps.
 
 **Authorization:** Admin only
 
+#### `clear_settlement_contract`
+Unset a previously configured settlement contract. After clearing,
+`get_settlement_contract` returns `None` and payouts stop routing through
+settlement swaps. Also removes any pending (timelocked) settlement-contract
+change. Clearing when nothing is configured is a no-op that still succeeds.
+
+**Parameters:**
+- `admin: Address` - Admin address
+
+**Authorization:** Admin only
+
+#### `set_fleet_management_contract`
+Configure the fleet-management contract consulted during driver payouts. When
+set, `payout_driver` calls `get_payout_address(driver, fleet_id)` on it for any
+escrow that carries a `fleet_id` and sends the driver's earnings to the address
+it returns.
+
+**Parameters:**
+- `admin: Address` - Admin address
+- `fleet_contract: Address` - Fleet-management contract address
+
+**Authorization:** Admin only
+
+#### `clear_fleet_management_contract`
+Unset a previously configured fleet-management contract (Issue #239), mirroring
+`clear_settlement_contract`. After clearing, `get_fleet_management_contract`
+returns `None` and payouts for fleet-linked escrows fall back to paying the
+driver directly instead of routing through a cross-contract
+`get_payout_address` call. Clearing when nothing is configured is a no-op that
+still succeeds.
+
+**Parameters:**
+- `admin: Address` - Admin address
+
+**Authorization:** Admin only
+
+**Note — no `clear_dispute_resolution_contract`:** `set_dispute_resolution_contract`
+deliberately has no clearing counterpart. `freeze_funds` pins its caller to the
+configured dispute-resolution contract and reads that address expecting it to be
+present, so unsetting it would permanently disable the protocol's ability to
+freeze a suspicious escrow. The intended remedy for a misbehaving dispute
+contract is to repoint it with `set_dispute_resolution_contract`, not to remove
+the integration.
+
 #### `set_paused`
 Emergency circuit breaker. When paused, blocks every operation that creates a
 new escrow or moves funds out of the contract.
@@ -378,6 +422,12 @@ Returns protocol version number.
 
 #### `get_settlement_contract`
 Returns settlement contract address if configured.
+
+**Returns:** `Option<Address>`
+
+#### `get_fleet_management_contract`
+Returns the configured fleet-management contract address, or `None` if none is
+set or it has been cleared with `clear_fleet_management_contract`.
 
 **Returns:** `Option<Address>`
 

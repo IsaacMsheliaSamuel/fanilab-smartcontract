@@ -49,6 +49,29 @@ Secure two-step process:
 
 This prevents accidental transfers and ensures new admin has access.
 
+### Dispute Resolution Admin Roster
+
+`dispute_resolution_contract` is governed by a **multi-admin roster** rather
+than a single admin. Any admin may add or remove admins, subject to two
+structural guards:
+
+1. **Last-admin protection.** A removal that would empty the roster is
+   rejected (`InvalidState`). Governance can never be bricked.
+2. **No self-service consolidation (Issue #212).** A removal that would leave
+   the roster with exactly one admin is permitted **only when the caller is
+   removing themselves** — a deliberate step-down. An admin may never remove a
+   *different* admin in a way that leaves the caller as the sole remaining
+   admin. Ordinary removals still work while at least one other admin remains,
+   and a full hand-off is done by adding the successor first and then stepping
+   down. This stops a single (possibly compromised) admin key from removing
+   every other admin one call at a time until it is the sole arbiter of every
+   dispute.
+
+**Transparency.** `add_admin` and `remove_admin` each emit an event
+(`admin_added` / `admin_removed`) whose payload is `(caller, affected_admin)`,
+so the remaining admins and any off-chain monitoring can detect roster changes
+immediately. `list_admins` always reflects the current roster.
+
 ### Dispute Resolution
 
 Admins can resolve disputes in three ways:
@@ -103,6 +126,7 @@ All governance actions emit events:
 - `ProtocolInitialized`
 - `FeeUpdated`
 - `AdminTransferred`
+- `admin_added` / `admin_removed` (dispute-resolution roster changes)
 - `dispute_resolved`
 
 ### Off-Chain Communication

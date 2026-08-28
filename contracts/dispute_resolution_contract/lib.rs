@@ -129,6 +129,35 @@ pub enum DataKey {
 #[contract]
 pub struct DisputeResolutionContract;
 
+impl DisputeResolutionContract {
+    /// Issue #211: every admin resolution entry point requires the linked
+    /// escrow to be in `Paused` (i.e. under active dispute) before it acts.
+    /// `resolve_dispute_refund_sender`, `resolve_dispute_pay_driver`, and
+    /// `resolve_dispute_split_funds` all call this first — before mutating the
+    /// dispute record or making any cross-contract side effect — so a
+    /// bad-state call fails fast here instead of surfacing as an
+    /// `InvalidState` thrown several calls deep inside `escrow_contract`
+    /// after a reputation adjustment has already been attempted.
+    /// `escrow_contract::resolve_dispute`'s own guard remains the
+    /// authoritative check; this is a fail-fast layer with one implementation
+    /// shared by all three entry points.
+    fn require_escrow_paused(env: &Env, delivery_id: DeliveryId) {
+        let escrow_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .unwrap_or_else(|| panic_with_error!(env, FaniLabError::NotInitialized));
+        let escrow: EscrowRecord = env.invoke_contract(
+            &escrow_addr,
+            &Symbol::new(env, "get_escrow"),
+            soroban_sdk::vec![env, u64::from(delivery_id).into_val(env)],
+        );
+        if escrow.status != EscrowStatus::Paused {
+            panic_with_error!(env, FaniLabError::InvalidState);
+        }
+    }
+}
+
 #[contractimpl]
 impl DisputeResolutionContract {
     pub fn init(
@@ -171,6 +200,7 @@ impl DisputeResolutionContract {
             .set(&DataKey::AdminList, &admin_list);
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn add_admin(env: Env, caller: Address, new_admin: Address) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -187,13 +217,19 @@ impl DisputeResolutionContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         if !admin_list.iter().any(|a| a == new_admin) {
-            admin_list.push_back(new_admin);
+            admin_list.push_back(new_admin.clone());
             env.storage()
                 .instance()
                 .set(&DataKey::AdminList, &admin_list);
         }
+
+        // Issue #212: emit a roster-change event so the remaining admins and
+        // any off-chain monitoring can detect additions immediately.
+        env.events()
+            .publish((Symbol::new(&env, "admin_added"),), (caller, new_admin));
     }
 
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
     pub fn remove_admin(env: Env, caller: Address, old_admin: Address) {
         caller.require_auth();
         if !Self::is_admin(env.clone(), caller.clone()) {
@@ -219,10 +255,27 @@ impl DisputeResolutionContract {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
 
+        // Issue #212: a single admin must not be able to consolidate the
+        // roster down to only themselves in one uninterrupted sequence.
+        // Reducing the roster to exactly one admin is therefore permitted
+        // only when the caller is removing themselves (a deliberate
+        // step-down); an admin removing a *different* admin may never leave
+        // itself as the sole remaining admin. Legitimate removals still work
+        // while at least one other admin remains, and a full hand-off is done
+        // by adding the successor first and then stepping down.
+        if new_list.len() == 1 && old_admin != caller {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
         env.storage()
             .instance()
             .remove(&DataKey::Admin(old_admin.clone()));
         env.storage().instance().set(&DataKey::AdminList, &new_list);
+
+        // Issue #212: emit a roster-change event identifying the caller and
+        // the removed address for the remaining admins / off-chain monitors.
+        env.events()
+            .publish((Symbol::new(&env, "admin_removed"),), (caller, old_admin));
     }
 
     pub fn is_admin(env: Env, admin: Address) -> bool {
@@ -533,6 +586,10 @@ impl DisputeResolutionContract {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
 
+        // Issue #211: reject a non-Paused escrow before any state mutation or
+        // cross-contract side effect (the reputation adjustment below).
+        Self::require_escrow_paused(&env, delivery_id);
+
         dispute.status = DisputeStatus::ResolvedRefund;
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
@@ -621,6 +678,11 @@ impl DisputeResolutionContract {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
 
+        // Issue #211: reject a non-Paused escrow before any state mutation or
+        // cross-contract side effect, via the same shared precondition used by
+        // the other two resolution entry points.
+        Self::require_escrow_paused(&env, delivery_id);
+
         dispute.status = DisputeStatus::Split;
         dispute.resolved_at = Some(env.ledger().timestamp());
         dispute.resolved_by = Some(caller.clone());
@@ -632,15 +694,6 @@ impl DisputeResolutionContract {
         );
 
         let escrow_addr = Self::get_escrow_contract(env.clone());
-        let escrow: EscrowRecord = env.invoke_contract(
-            &escrow_addr,
-            &Symbol::new(&env, "get_escrow"),
-            soroban_sdk::vec![&env, u64::from(delivery_id).into_val(&env)],
-        );
-
-        if escrow.status != EscrowStatus::Paused {
-            panic_with_error!(&env, FaniLabError::InvalidState);
-        }
 
         // Apply a partial reputation penalty to the driver for a split outcome
         let delivery_contract_addr = Self::get_delivery_contract(env.clone());
@@ -713,6 +766,10 @@ impl DisputeResolutionContract {
         if dispute.status != DisputeStatus::Open {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
+
+        // Issue #211: reject a non-Paused escrow before any state mutation or
+        // cross-contract side effect (the reputation adjustment below).
+        Self::require_escrow_paused(&env, delivery_id);
 
         dispute.status = DisputeStatus::ResolvedPayout;
         dispute.resolved_at = Some(env.ledger().timestamp());
@@ -815,7 +872,7 @@ impl DisputeResolutionContract {
         // Check 3: Verify the resolution window has elapsed
         let resolution_limit = Self::get_dispute_resolution_limit(env.clone());
         let current_time = env.ledger().timestamp();
-        if current_time <= dispute.raised_at + resolution_limit {
+        if current_time <= dispute.raised_at.saturating_add(resolution_limit) {
             panic_with_error!(&env, FaniLabError::InvalidState);
         }
 

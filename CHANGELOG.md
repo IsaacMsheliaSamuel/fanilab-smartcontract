@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `escrow_contract::clear_fleet_management_contract(admin)` — admin-gated, mirrors `clear_settlement_contract`: unsets a configured fleet-management contract so `get_fleet_management_contract` returns `None` and payouts for fleet-linked escrows go directly to the driver; a no-op that still succeeds when nothing is configured (Issue #239). No `clear_dispute_resolution_contract` counterpart is provided — clearing it would permanently disable `freeze_funds`; the documented remedy is to repoint via `set_dispute_resolution_contract` (decision recorded in `docs/API.md`)
+- `dispute_resolution_contract`: `add_admin` / `remove_admin` now emit `admin_added` / `admin_removed` events carrying `(caller, affected_admin)` so roster changes are observable on-chain (Issue #212)
+- Full test module for `dispute_resolution_contract::force_resolve_dispute` — timing boundaries (before / exactly at / after the resolution window), authorization for each delivery party and a non-party, the open-dispute precondition, populated `resolved_at`/`resolved_by`, and a near-`u64::MAX` resolution limit that no longer overflows (Issue #213)
+- Regression tests that `resolve_dispute_refund_sender` and `resolve_dispute_pay_driver` reject a non-`Paused` escrow before any state mutation or reputation adjustment, plus coverage that all three resolution entry points still succeed against a `Paused` escrow (Issue #211)
 - Production-ready CI/CD pipeline with security audits
 - CI: coverage upload now fails the build on error (`fail_ci_if_error: true`)
 - CI: `cargo machete` step to detect unused dependencies automatically

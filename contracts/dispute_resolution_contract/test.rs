@@ -240,9 +240,45 @@ fn test_admin_whitelist_management() {
     dispute_client.add_admin(&admin, &new_admin);
     assert!(dispute_client.is_admin(&new_admin));
 
-    // New admin removes original admin
-    dispute_client.remove_admin(&new_admin, &admin);
+    // Original admin steps down, leaving new_admin as the sole admin. A
+    // self-removal is the sanctioned way to reduce the roster to one admin
+    // (Issue #212); an admin removing a *different* admin may never leave
+    // itself alone.
+    dispute_client.remove_admin(&admin, &admin);
     assert!(!dispute_client.is_admin(&admin));
+    assert!(dispute_client.is_admin(&new_admin));
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
+fn test_admin_cannot_consolidate_roster_to_self() {
+    // Issue #212: an admin must not be able to reduce the roster to only
+    // itself by removing the others.
+    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    let admin2 = Address::generate(&env);
+    dispute_client.add_admin(&admin, &admin2);
+
+    // `admin` removing `admin2` would leave `admin` as the sole admin — the
+    // self-service consolidation this guard blocks.
+    dispute_client.remove_admin(&admin, &admin2);
+}
+
+#[test]
+fn test_admin_removal_still_works_while_another_admin_remains() {
+    // Issue #212 regression: legitimate removals through the intended process
+    // still succeed as long as at least one other admin remains.
+    let (env, admin, _, _, _, _, _, dispute_client) = setup_test();
+
+    let admin2 = Address::generate(&env);
+    let admin3 = Address::generate(&env);
+    dispute_client.add_admin(&admin, &admin2);
+    dispute_client.add_admin(&admin, &admin3);
+
+    // Roster is [admin, admin2, admin3]; removing admin3 leaves two admins.
+    dispute_client.remove_admin(&admin, &admin3);
+    assert!(!dispute_client.is_admin(&admin3));
+    assert_eq!(dispute_client.list_admins().len(), 2);
 }
 
 #[test]
@@ -1516,7 +1552,9 @@ fn test_list_admins_after_removing_admin() {
 
     let new_admin = Address::generate(&env);
     dispute_client.add_admin(&admin, &new_admin);
-    dispute_client.remove_admin(&admin, &new_admin);
+    // `new_admin` steps down; reducing the roster to a single admin is only
+    // permitted via self-removal (Issue #212).
+    dispute_client.remove_admin(&new_admin, &new_admin);
 
     let admins = dispute_client.list_admins();
     assert_eq!(admins.len(), 1);
