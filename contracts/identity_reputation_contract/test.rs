@@ -1,6 +1,15 @@
 use super::*;
+use proptest::prelude::*;
 use shared_types::FaniLabError;
 use soroban_sdk::{testutils::Address as _, Address, Env};
+
+#[rustfmt::skip]
+proptest! {
+    #[test] fn reputation_is_bounded(score in any::<u32>(), points in any::<u32>()) {
+        prop_assert!(reputation_up(score.min(MAX_REPUTATION), points) <= MAX_REPUTATION);
+        prop_assert!(reputation_down(score.min(MAX_REPUTATION), points) <= MAX_REPUTATION);
+    }
+}
 
 fn setup() -> (
     Env,
@@ -270,6 +279,14 @@ fn test_set_reputation_config_unauthorized() {
 }
 
 // Cross-contract wiring updates
+
+#[test]
+fn test_init_stores_cross_contract_addresses() {
+    let (env, _, client, delivery_contract, dispute_contract) = setup();
+
+    assert_eq!(client.get_delivery_contract(), delivery_contract);
+    assert_eq!(client.get_dispute_contract(), dispute_contract);
+}
 
 #[test]
 fn test_admin_can_repoint_cross_contracts() {

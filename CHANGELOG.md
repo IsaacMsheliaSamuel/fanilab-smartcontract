@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pinned Rust toolchain to 1.81.0** in CI workflows for consistent compilation across environments
 - Added `#[allow(deprecated)]` annotations for SDK 27.0.0 `env.events().publish()` API deprecation (remains functional)
 
+### Fixed
+- `escrow_contract::create_escrows_batch` now increments `TotalLocked(token)` by the sum of the batch, matching `create_escrow`'s fund accounting so `sweep_untracked_balance` can no longer drain batch-created escrows as "untracked" surplus (Issue #188)
+- `escrow_contract::create_escrows_batch` now enforces the same guards as `create_escrow`: the batch token must match `ProtocolConfig::token` (`InvalidToken`) and every element amount must be positive (`InvalidAmount`) (Issue #189)
+
 ### Removed
 - **BREAKING:** `FaniLabError::EscrowLocked` (discriminant 7) and `FaniLabError::InvalidAddress` (discriminant 10) — dead error variants never returned by any contract in the workspace. Off-chain code matching on these discriminant values should be updated; the numeric codes are not reused by other variants.
 - `escrow_contract::get_status` — dead stub that always returned `DeliveryStatus::Pending`. Use `get_escrow(id).status` instead.

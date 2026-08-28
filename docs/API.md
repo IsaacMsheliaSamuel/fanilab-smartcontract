@@ -393,12 +393,13 @@ Retrieve full escrow record.
 - `DeliveryNotFound` - No escrow for this delivery
 
 #### `create_escrows_batch`
-Create multiple escrows in a single transaction (up to 100 per batch).
+Create multiple escrows in a single transaction (up to 100 per batch). Enforces
+the same token and amount validation as `create_escrow`.
 
 **Parameters:**
 - `sender: Address` - Sender funding all escrows
 - `recipient: Address` - Delivery recipient (shared for all)
-- `token: Address` - Token for all escrows
+- `token: Address` - Token for all escrows; must match the protocol-configured token
 - `escrow_list: Vec<(u64, Address, i128)>` — tuples of (delivery_id, driver, amount)
 
 **Authorization:** Sender
@@ -406,10 +407,14 @@ Create multiple escrows in a single transaction (up to 100 per batch).
 **Returns:** `u32` — count of escrows created
 
 **Errors:**
+- `InvalidToken` - Token does not match the protocol-configured token
+- `InvalidAmount` - Any element's amount is not positive
 - `DuplicateDelivery` - Escrow already exists for any delivery_id
 - `InvalidState` - Batch size exceeds 100
 
 **Events:** `escrow_funded` (once per escrow)
+
+> **IMPORTANT — Integration Requirement:** This function is designed to pair with `delivery_contract::create_deliveries_batch`. The delivery IDs passed in `escrow_list` must have been created by `create_deliveries_batch` first. Call this function after receiving delivery IDs from the batch delivery creation, passing (delivery_id, driver, amount) tuples for each delivery that needs escrow backing.
 
 #### `get_escrows_by_sender`
 Get all escrow delivery IDs initiated by a sender.
@@ -661,6 +666,13 @@ Create multiple deliveries in a single transaction (up to 100 per batch).
 - Increments delivery counter for each delivery
 - Stores delivery records with Pending status
 - Updates secondary indexes for sender and recipient
+
+> **IMPORTANT — Integration Requirement:** This function creates delivery records only; it does NOT create escrows. Escrow creation must be performed as a separate operation using `escrow_contract::create_escrows_batch`. The two operations must be paired in sequence:
+>
+> 1. Call `create_deliveries_batch` → returns `Vec<DeliveryId>`
+> 2. Call `escrow_contract::create_escrows_batch` with the returned delivery IDs and (driver, amount) pairs
+>
+> Deliveries without escrows will fail at driver assignment or confirmation stages with `DeliveryNotFound` errors. The ordering constraint exists because delivery IDs must be known before escrows can reference them.
 
 #### `get_deliveries_by_sender`
 Get all delivery IDs initiated by a sender.
