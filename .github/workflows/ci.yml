@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Both jobs only read the repository; the Codecov upload uses tokenless
+# same-repo upload and needs no extra scope (#244).
+permissions:
+  contents: read
+
 jobs:
   build_and_test:
     name: Build and Test Contracts

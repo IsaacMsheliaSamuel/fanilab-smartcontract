@@ -20,6 +20,11 @@ env:
   CARGO_TERM_COLOR: always
   STELLAR_NETWORK: testnet
 
+# Checkout and artifact upload are all this workflow needs; deployment
+# authority comes from CONTRACT_DEPLOYER_SECRET, not the GITHUB_TOKEN (#244).
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy Contract to Testnet
@@ -43,7 +48,7 @@ jobs:
         cargo install --locked stellar-cli --features opt
 
     - name: Build Contracts
-      run: cargo build --target wasm32v1-none --release
+      run: cargo build --locked --target wasm32v1-none --release
 
     - name: Optimize WASM
       run: |

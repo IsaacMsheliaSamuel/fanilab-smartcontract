@@ -10,6 +10,17 @@ use soroban_sdk::{
 };
 
 pub mod constants {
+    /// On-chain protocol version for the escrow contract's stored
+    /// `ProtocolConfig` and `get_protocol_version()`.
+    ///
+    /// This is an **independent** identifier from the crate/package version
+    /// declared in `contracts/*/Cargo.toml` and from the git release tag
+    /// (`vX.Y.Z`). The crate version and release tag track the source and
+    /// published-artifact history and must agree with each other (enforced by
+    /// `.github/workflows/release.yml`). `PROTOCOL_VERSION` instead tracks the
+    /// on-chain data/behaviour contract and only bumps when that changes in a
+    /// way on-chain or off-chain consumers must branch on. A crate release
+    /// with no protocol-observable change leaves this value untouched.
     pub const PROTOCOL_VERSION: u32 = 1;
     pub const MAX_BATCH_SIZE: u32 = 100;
     pub const DEFAULT_ESCROW_EXPIRY_SECONDS: u64 = 30 * 24 * 60 * 60; // 30 days
