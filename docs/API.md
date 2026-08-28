@@ -42,7 +42,7 @@ These indexes are automatically maintained by the respective contracts and are b
 - `get_escrows_by_driver(driver: Address) -> Vec<u64>` — all escrow delivery IDs for driver
 
 **Fleet Management Contract:**
-- `get_fleet_roster(fleet_id: FleetId) -> Vec<Address>` — all drivers in a fleet
+- `get_fleet_roster(fleet_id: FleetId) -> Vec<Address>` — active drivers in a fleet
 
 ### Interim: Event-Replay Indexing
 
