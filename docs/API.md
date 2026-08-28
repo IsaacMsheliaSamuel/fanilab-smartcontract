@@ -731,6 +731,14 @@ pub enum DisputeStatus {
 }
 ```
 
+#### `EvidenceEntry`
+```rust
+pub struct EvidenceEntry {
+    pub submitter: Address,     // Party that submitted this hash
+    pub hash:      BytesN<32>,  // SHA-256 hash of the evidence document/image
+}
+```
+
 #### `DisputeCase`
 ```rust
 pub struct DisputeCase {
@@ -738,7 +746,9 @@ pub struct DisputeCase {
     pub status:          DisputeStatus,
     pub raised_at:       u64,
     pub raised_by:       Address,
-    pub evidence_hashes: Vec<BytesN<32>>,
+    pub evidence_hashes: Vec<EvidenceEntry>,  // recorded with the submitting party
+    pub resolved_at:     Option<u64>,
+    pub resolved_by:     Option<Address>,
 }
 ```
 
@@ -751,12 +761,14 @@ Initialize the dispute resolution contract.
 - `admin: Address` - Initial admin address
 - `delivery_contract: Address` - Address of the delivery contract
 - `escrow_contract: Address` - Address of the escrow contract
-- `dispute_time_limit: u64` - Seconds after delivery within which a dispute may be raised
+- `dispute_time_limit: u64` - Seconds after delivery within which a dispute may be raised (must be ≥ `MIN_DISPUTE_TIME_LIMIT`, 1 day)
+- `dispute_resolution_limit: u64` - Seconds a dispute may stay `Open` before any party may `force_resolve_dispute` (must be ≥ `MIN_DISPUTE_RESOLUTION_LIMIT`, 1 day)
 
 **Authorization:** Contract deployer
 
 **Errors:**
 - `AlreadyInitialized` - Contract has already been initialized
+- `InvalidState` - `dispute_time_limit` or `dispute_resolution_limit` is below its floor
 
 ### Admin Operations
 
@@ -883,21 +895,22 @@ Open a dispute for an active, in-transit, or recently delivered delivery.
 Attach a SHA-256 evidence hash to an open dispute.
 
 **Parameters:**
-- `caller: Address` - Sender or recipient submitting evidence
+- `caller: Address` - Sender, recipient, or driver submitting evidence
 - `delivery_id: DeliveryId` - Delivery identifier
 - `evidence_hash: BytesN<32>` - SHA-256 hash of the evidence document/image
 
-**Authorization:** Delivery sender or recipient
+**Authorization:** Delivery sender, recipient, or driver
 
 **Errors:**
 - `DeliveryNotFound` - No dispute exists for this delivery
-- `InvalidState` - Dispute is not in `Open` status
-- `Unauthorized` - Caller is neither sender nor recipient
+- `InvalidState` - Dispute is not in `Open` status, or the calling party has already submitted this exact hash
+- `Unauthorized` - Caller is not a party to the delivery
+- `LimitExceeded` - The calling party has reached its per-party quota of 20 evidence hashes for this dispute
 
 **Events:** `evidence_added`
 
 **State Changes:**
-- Appends `evidence_hash` to `DisputeCase.evidence_hashes`
+- Appends `EvidenceEntry { submitter: caller, hash: evidence_hash }` to `DisputeCase.evidence_hashes`. The 20-hash cap is enforced **per submitting party**, so one party can neither exhaust another's quota nor lock the counterparty out.
 
 #### `resolve_dispute_refund_sender`
 Admin verdict: full refund to sender. Applies a reputation penalty to the driver.
@@ -1554,6 +1567,39 @@ identity_contract.decrease_reputation(
     &dispute_contract,
     &driver,
     10u32  // deduct 10 points
+);
+```
+
+#### `award_reputation`
+Add a flat reputation credit to a driver — used when a dispute is resolved in the
+driver's favour. Unlike `increase_reputation`, this does **not** derive points
+from cargo attributes and does **not** increment `deliveries_completed` (a dispute
+ruling is not a delivery completion, and counting it as one would double-count if
+the delivery is later confirmed).
+
+**Parameters:**
+- `caller: Address` - Must be the delivery contract or dispute contract
+- `driver: Address` - Driver whose score is being credited
+- `points: u32` - Number of reputation points to add
+
+**Authorization:** Delivery contract or dispute contract only
+
+**Errors:**
+- `Unauthorized` - Caller is not an authorized contract
+- `ProviderNotFound` - Driver profile does not exist
+
+**Events:** `reputation_awarded`
+
+**State Changes:**
+- Increases `reputation_score` by `points`, capped at 100
+- Leaves `deliveries_completed` unchanged
+
+**Example:**
+```rust
+identity_contract.award_reputation(
+    &dispute_contract,
+    &driver,
+    5u32  // flat dispute reward
 );
 ```
 

@@ -1,14 +1,31 @@
+extern crate std;
+
 use super::*;
-use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus};
+use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus, FaniLabError};
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, String,
+    xdr, Address, Env, String, Symbol, TryFromVal, Val,
 };
 
 fn did(value: u64) -> DeliveryId {
     DeliveryId::from(value)
+}
+
+/// Decode the most recently published event into a (topics, data) pair. SDK 27's
+/// `ContractEvents` only exposes the raw XDR form, so it has to be converted back
+/// to host values before assertions can be made against it.
+fn last_event(env: &Env) -> (soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    let raw = events.events().last().expect("no events emitted").clone();
+    let xdr::ContractEventBody::V0(body) = raw.body;
+    let mut topics = soroban_sdk::Vec::new(env);
+    for topic in body.topics.iter() {
+        topics.push_back(Val::try_from_val(env, topic).expect("failed to decode topic"));
+    }
+    let data = Val::try_from_val(env, &body.data).expect("failed to decode event data");
+    (topics, data)
 }
 
 #[contract]
@@ -564,8 +581,10 @@ fn test_add_evidence_hash_success() {
 
     let case = dispute_client.get_dispute(&did(6));
     assert_eq!(case.evidence_hashes.len(), 2);
-    assert_eq!(case.evidence_hashes.get(0).unwrap(), evidence_hash1);
-    assert_eq!(case.evidence_hashes.get(1).unwrap(), evidence_hash2);
+    assert_eq!(case.evidence_hashes.get(0).unwrap().hash, evidence_hash1);
+    assert_eq!(case.evidence_hashes.get(0).unwrap().submitter, sender);
+    assert_eq!(case.evidence_hashes.get(1).unwrap().hash, evidence_hash2);
+    assert_eq!(case.evidence_hashes.get(1).unwrap().submitter, recipient);
 }
 
 #[test]
@@ -609,13 +628,13 @@ fn test_add_evidence_hash_up_to_cap_succeeds() {
 
     dispute_client.raise_dispute(&sender, &did(8));
 
-    for i in 0..MAX_EVIDENCE_HASHES {
+    for i in 0..MAX_EVIDENCE_HASHES_PER_PARTY {
         let hash = soroban_sdk::BytesN::from_array(&env, &[i as u8; 32]);
         dispute_client.add_evidence_hash(&sender, &did(8), &hash);
     }
 
     let case = dispute_client.get_dispute(&did(8));
-    assert_eq!(case.evidence_hashes.len(), MAX_EVIDENCE_HASHES);
+    assert_eq!(case.evidence_hashes.len(), MAX_EVIDENCE_HASHES_PER_PARTY);
 }
 
 #[test]
@@ -636,14 +655,203 @@ fn test_add_evidence_hash_beyond_cap_rejected() {
 
     dispute_client.raise_dispute(&sender, &did(9));
 
-    for i in 0..MAX_EVIDENCE_HASHES {
+    for i in 0..MAX_EVIDENCE_HASHES_PER_PARTY {
         let hash = soroban_sdk::BytesN::from_array(&env, &[i as u8; 32]);
         dispute_client.add_evidence_hash(&sender, &did(9), &hash);
     }
 
-    // One past the cap must be rejected.
+    // One past the per-party cap must be rejected.
     let one_too_many = soroban_sdk::BytesN::from_array(&env, &[0xFF; 32]);
     dispute_client.add_evidence_hash(&sender, &did(9), &one_too_many);
+}
+
+// ── PER-PARTY EVIDENCE QUOTA (Issue #209) ────────────────────────────────────
+
+/// Regression: one party exhausting its evidence quota must not stop another
+/// party from submitting. Before the per-party quota, a shared cap let the
+/// first party lock the counterparty out for the life of the dispute.
+#[test]
+fn test_evidence_quota_is_per_party_no_lockout() {
+    let (env, _admin, sender, recipient, driver, delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let mut delivery_record = create_mock_delivery_record(
+        &env,
+        did(20),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(&env, &delivery_id, did(20), &delivery_record);
+
+    dispute_client.raise_dispute(&sender, &did(20));
+
+    // Sender fills its entire quota.
+    for i in 0..MAX_EVIDENCE_HASHES_PER_PARTY {
+        let hash = soroban_sdk::BytesN::from_array(&env, &[i as u8; 32]);
+        dispute_client.add_evidence_hash(&sender, &did(20), &hash);
+    }
+
+    // Recipient and driver can still submit their own evidence.
+    let r_hash = soroban_sdk::BytesN::from_array(&env, &[0xAA; 32]);
+    let d_hash = soroban_sdk::BytesN::from_array(&env, &[0xBB; 32]);
+    dispute_client.add_evidence_hash(&recipient, &did(20), &r_hash);
+    dispute_client.add_evidence_hash(&driver, &did(20), &d_hash);
+
+    let case = dispute_client.get_dispute(&did(20));
+    assert_eq!(
+        case.evidence_hashes.len(),
+        MAX_EVIDENCE_HASHES_PER_PARTY + 2
+    );
+}
+
+/// A party cannot submit the same hash twice; a different party still can.
+#[test]
+fn test_evidence_duplicate_from_same_party_rejected() {
+    let (env, _admin, sender, recipient, _driver, delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(21),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(21), &delivery_record);
+
+    dispute_client.raise_dispute(&sender, &did(21));
+
+    let hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+    dispute_client.add_evidence_hash(&sender, &did(21), &hash);
+
+    // Same party, same hash → rejected.
+    let res = dispute_client.try_add_evidence_hash(&sender, &did(21), &hash);
+    assert!(res.is_err());
+
+    // Different party referencing the same document is still allowed.
+    dispute_client.add_evidence_hash(&recipient, &did(21), &hash);
+
+    let case = dispute_client.get_dispute(&did(21));
+    assert_eq!(case.evidence_hashes.len(), 2);
+}
+
+/// Quota exhaustion returns `LimitExceeded` only for the party that is full;
+/// other parties are unaffected.
+#[test]
+fn test_evidence_quota_exhaustion_is_scoped_to_offending_party() {
+    let (env, _admin, sender, recipient, _driver, delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let delivery_record = create_mock_delivery_record(
+        &env,
+        did(22),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    set_mock_delivery(&env, &delivery_id, did(22), &delivery_record);
+
+    dispute_client.raise_dispute(&sender, &did(22));
+
+    for i in 0..MAX_EVIDENCE_HASHES_PER_PARTY {
+        let hash = soroban_sdk::BytesN::from_array(&env, &[i as u8; 32]);
+        dispute_client.add_evidence_hash(&sender, &did(22), &hash);
+    }
+
+    // Sender is full — its next submission fails with LimitExceeded.
+    let extra = soroban_sdk::BytesN::from_array(&env, &[0xF0; 32]);
+    match dispute_client.try_add_evidence_hash(&sender, &did(22), &extra) {
+        Err(Ok(err)) => assert_eq!(err, FaniLabError::LimitExceeded.into()),
+        other => panic!("expected LimitExceeded for the full party, got {other:?}"),
+    }
+
+    // Recipient is not affected by the sender's exhausted quota.
+    dispute_client.add_evidence_hash(&recipient, &did(22), &extra);
+}
+
+/// Total per-dispute evidence storage stays bounded: with three authorized
+/// parties the hard ceiling is `3 * MAX_EVIDENCE_HASHES_PER_PARTY`, and any
+/// submission past that is rejected regardless of caller.
+#[test]
+fn test_evidence_total_storage_bounded_across_all_parties() {
+    let (env, _admin, sender, recipient, driver, delivery_id, _escrow_id, dispute_client) =
+        setup_test();
+
+    let mut delivery_record = create_mock_delivery_record(
+        &env,
+        did(23),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(&env, &delivery_id, did(23), &delivery_record);
+
+    dispute_client.raise_dispute(&sender, &did(23));
+
+    for (party_idx, party) in [sender.clone(), recipient.clone(), driver.clone()]
+        .iter()
+        .enumerate()
+    {
+        for i in 0..MAX_EVIDENCE_HASHES_PER_PARTY {
+            let hash =
+                soroban_sdk::BytesN::from_array(&env, &[(party_idx as u8) * 100 + i as u8; 32]);
+            dispute_client.add_evidence_hash(party, &did(23), &hash);
+        }
+    }
+
+    let case = dispute_client.get_dispute(&did(23));
+    assert_eq!(
+        case.evidence_hashes.len(),
+        3 * MAX_EVIDENCE_HASHES_PER_PARTY
+    );
+
+    // Every party is now at its quota — no one can add more.
+    let extra = soroban_sdk::BytesN::from_array(&env, &[0xEE; 32]);
+    assert!(dispute_client
+        .try_add_evidence_hash(&recipient, &did(23), &extra)
+        .is_err());
+}
+
+/// Existing behavior: evidence cannot be added once a dispute leaves `Open`.
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #5)")] // FaniLabError::InvalidState
+fn test_evidence_cannot_be_added_to_resolved_dispute() {
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let mut delivery_record = create_mock_delivery_record(
+        &env,
+        did(24),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(&env, &delivery_id, did(24), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Paused,
+    );
+    set_mock_escrow(&env, &escrow_id, 24, &escrow_record);
+
+    dispute_client.raise_dispute(&sender, &did(24));
+    dispute_client.resolve_dispute_refund_sender(&admin, &did(24));
+
+    let hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    dispute_client.add_evidence_hash(&sender, &did(24), &hash);
 }
 
 #[test]
@@ -846,11 +1054,29 @@ fn test_integration_resolve_dispute_refund_sender_decreases_reputation() {
 
 #[test]
 fn test_resolve_dispute_pay_driver_by_admin() {
+    use identity_reputation_contract::{
+        IdentityReputationContract, IdentityReputationContractClient,
+    };
+
     let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
         setup_test();
 
-    // Setup mock delivery
-    let delivery_record = create_mock_delivery_record(
+    // Wire a real identity-reputation contract so the reputation-award branch
+    // of resolve_dispute_pay_driver is actually executed (previously this test
+    // ran with no reputation contract configured, so the malformed cross-call
+    // was never reached — see issue #207).
+    let identity_id = env.register(IdentityReputationContract, ());
+    let identity_client = IdentityReputationContractClient::new(&env, &identity_id);
+    identity_client.init(&admin, &delivery_id, &dispute_client.address);
+    dispute_client.set_identity_reputation_contract(&admin, &identity_id);
+    identity_client.register_driver(&driver);
+    assert_eq!(
+        identity_client.get_driver_profile(&driver).reputation_score,
+        50
+    );
+
+    // Setup mock delivery with the driver assigned.
+    let mut delivery_record = create_mock_delivery_record(
         &env,
         did(8),
         sender.clone(),
@@ -858,6 +1084,7 @@ fn test_resolve_dispute_pay_driver_by_admin() {
         DeliveryStatus::Active,
         None,
     );
+    delivery_record.driver = Some(driver.clone());
     set_mock_delivery(&env, &delivery_id, did(8), &delivery_record);
 
     // Setup mock escrow as Paused (representing escrow paused after dispute raised)
@@ -884,6 +1111,171 @@ fn test_resolve_dispute_pay_driver_by_admin() {
     // Verify mock escrow status updated to Released
     let escrow = MockEscrowContractClient::new(&env, &escrow_id).get_escrow(&8);
     assert_eq!(escrow.status, shared_types::EscrowStatus::Released);
+
+    // The driver's reputation went up by the flat dispute reward, and the
+    // award did NOT count as a delivery completion.
+    let profile = identity_client.get_driver_profile(&driver);
+    assert_eq!(profile.reputation_score, 55);
+    assert_eq!(profile.deliveries_completed, 0);
+}
+
+/// Issue #207 regression: `resolve_dispute_pay_driver` cross-calls the identity
+/// reputation contract with a malformed arity (three args where five are
+/// expected), so on any deployment with reputation wired the whole transaction
+/// reverted and a dispute could never be resolved in the driver's favour. This
+/// wires all four real contracts and asserts the ruling succeeds end to end and
+/// the driver's on-chain reputation actually rises by the flat dispute reward
+/// without counting as a delivery completion.
+#[test]
+fn test_integration_resolve_dispute_pay_driver_increases_reputation() {
+    use identity_reputation_contract::{
+        IdentityReputationContract, IdentityReputationContractClient,
+    };
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let driver = Address::generate(&env);
+
+    let delivery_contract_id = env.register(delivery_contract::DeliveryContract, ());
+    let escrow_contract_id = env.register(escrow_contract::EscrowContract, ());
+    let dispute_resolution_id = env.register(DisputeResolutionContract, ());
+    let identity_contract_id = env.register(IdentityReputationContract, ());
+
+    let delivery_client =
+        delivery_contract::DeliveryContractClient::new(&env, &delivery_contract_id);
+    let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
+    let dispute_client = DisputeResolutionContractClient::new(&env, &dispute_resolution_id);
+    let identity_client = IdentityReputationContractClient::new(&env, &identity_contract_id);
+
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    escrow_client.init(&admin, &token, &0);
+    escrow_client.set_dispute_resolution_contract(&admin, &dispute_resolution_id);
+    delivery_client.init(&admin, &escrow_contract_id);
+    dispute_client.init(
+        &admin,
+        &delivery_contract_id,
+        &escrow_contract_id,
+        &86400,
+        &604800,
+    );
+    identity_client.init(&admin, &delivery_contract_id, &dispute_resolution_id);
+    dispute_client.set_identity_reputation_contract(&admin, &identity_contract_id);
+
+    identity_client.register_driver(&driver);
+    assert_eq!(
+        identity_client.get_driver_profile(&driver).reputation_score,
+        50
+    );
+
+    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
+
+    let metadata = {
+        let cargo = shared_types::CargoDescriptor {
+            weight_grams: 500,
+            category: shared_types::CargoCategory::Electronics,
+            fragile: false,
+        };
+        shared_types::DeliveryMetadata {
+            delivery_id: 0,
+            origin: String::from_str(&env, "Origin"),
+            destination: String::from_str(&env, "Destination"),
+            cargo_description: cargo,
+            created_at: env.ledger().timestamp(),
+            estimated_delivery: env.ledger().timestamp() + 3600,
+        }
+    };
+    let delivery_id_val = delivery_client.create_delivery(&sender, &recipient, &metadata);
+
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &u64::from(delivery_id_val),
+        &token,
+        &1000,
+        &None,
+    );
+
+    delivery_client.assign_driver(&admin, &delivery_id_val, &driver);
+    dispute_client.raise_dispute(&sender, &delivery_id_val);
+
+    // The ruling must succeed — before the fix this call reverted.
+    dispute_client.resolve_dispute_pay_driver(&admin, &delivery_id_val);
+
+    let case = dispute_client.get_dispute(&delivery_id_val);
+    assert_eq!(case.status, DisputeStatus::ResolvedPayout);
+
+    // Driver reputation rose by the flat reward; it is not a delivery completion.
+    let profile = identity_client.get_driver_profile(&driver);
+    assert_eq!(profile.reputation_score, 55);
+    assert_eq!(profile.deliveries_completed, 0);
+
+    // Funds were released to the driver.
+    assert_eq!(TokenClient::new(&env, &token).balance(&driver), 1000);
+    assert_eq!(TokenClient::new(&env, &token).balance(&sender), 0);
+}
+
+/// Issue #207: a flat dispute award must never push a driver past the
+/// reputation ceiling.
+#[test]
+fn test_dispute_reward_respects_max_reputation() {
+    use identity_reputation_contract::{
+        IdentityReputationContract, IdentityReputationContractClient,
+    };
+
+    let (env, admin, sender, recipient, driver, delivery_id, escrow_id, dispute_client) =
+        setup_test();
+
+    let identity_id = env.register(IdentityReputationContract, ());
+    let identity_client = IdentityReputationContractClient::new(&env, &identity_id);
+    identity_client.init(&admin, &delivery_id, &dispute_client.address);
+    dispute_client.set_identity_reputation_contract(&admin, &identity_id);
+    identity_client.register_driver(&driver);
+
+    // Push the driver to the ceiling first via authorized flat awards.
+    for _ in 0..20 {
+        identity_client.award_reputation(&dispute_client.address, &driver, &10u32);
+    }
+    assert_eq!(
+        identity_client.get_driver_profile(&driver).reputation_score,
+        100
+    );
+
+    let mut delivery_record = create_mock_delivery_record(
+        &env,
+        did(25),
+        sender.clone(),
+        recipient.clone(),
+        DeliveryStatus::Active,
+        None,
+    );
+    delivery_record.driver = Some(driver.clone());
+    set_mock_delivery(&env, &delivery_id, did(25), &delivery_record);
+
+    let token = Address::generate(&env);
+    let escrow_record = create_mock_escrow_record(
+        sender.clone(),
+        recipient.clone(),
+        driver.clone(),
+        token,
+        shared_types::EscrowStatus::Paused,
+    );
+    set_mock_escrow(&env, &escrow_id, 25, &escrow_record);
+
+    dispute_client.raise_dispute(&sender, &did(25));
+    dispute_client.resolve_dispute_pay_driver(&admin, &did(25));
+
+    assert_eq!(
+        identity_client.get_driver_profile(&driver).reputation_score,
+        100
+    );
 }
 
 #[test]

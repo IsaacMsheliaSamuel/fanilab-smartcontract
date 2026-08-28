@@ -2,8 +2,8 @@
 
 use shared_types::{
     events, is_admin, ttl, DriverProfile, DriverRegisteredEvent, FaniLabError,
-    KycStatusUpdatedEvent, ReputationDecreasedEvent, ReputationIncreasedEvent, StorageKey,
-    UserProfile, UserRegisteredEvent,
+    KycStatusUpdatedEvent, ReputationAwardedEvent, ReputationDecreasedEvent,
+    ReputationIncreasedEvent, StorageKey, UserProfile, UserRegisteredEvent,
 };
 use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
 
@@ -416,6 +416,42 @@ impl IdentityReputationContract {
         env.events().publish(
             (events::reputation_decreased(&env),),
             ReputationDecreasedEvent { driver, points },
+        );
+    }
+
+    /// Apply a flat reputation award to a driver, mirroring `decrease_reputation`.
+    ///
+    /// Unlike `increase_reputation`, this does **not** derive points from cargo
+    /// weight/fragility and does **not** increment `deliveries_completed` — a
+    /// dispute ruling in the driver's favour is not a delivery completion, and
+    /// counting it as one would double-count if the delivery is later confirmed.
+    /// The resulting score is still capped at `MAX_REPUTATION`.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional; tracked in SOROBAN_SDK_27_MIGRATION.md#event-system-migration (Issue #114)
+    pub fn award_reputation(env: Env, caller: Address, driver: Address, points: u32) {
+        if !Self::is_authorized_contract(env.clone(), caller.clone()) {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        caller.require_auth();
+
+        let key = DataKey::DriverProfile(driver.clone());
+        let mut profile: DriverProfile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
+
+        profile.reputation_score = (profile.reputation_score + points).min(MAX_REPUTATION);
+
+        env.storage().persistent().set(&key, &profile);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        env.events().publish(
+            (events::reputation_awarded(&env),),
+            ReputationAwardedEvent { driver, points },
         );
     }
 

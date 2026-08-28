@@ -31,7 +31,7 @@ define no local error enum and raise only the shared `FaniLabError` below.
 | 8 | `DuplicateDelivery` | Delivery identifier already exists in protocol storage. |
 | 9 | `ProviderNotFound` | Provider or driver record could not be found. |
 | 11 | `ProtocolPaused` | Protocol is paused and fund movements are halted. |
-| 12 | `LimitExceeded` | Requested operation would exceed a fixed capacity/growth limit (e.g. `dispute_resolution_contract::add_evidence_hash` once a dispute already holds the maximum of 20 evidence hashes). |
+| 12 | `LimitExceeded` | Requested operation would exceed a fixed capacity/growth limit (e.g. `dispute_resolution_contract::add_evidence_hash` once the calling party has already submitted its per-party maximum of 20 evidence hashes for that dispute — the cap is enforced per submitting party, so at most `3 × 20` hashes accumulate across the three delivery parties). |
 
 Note: codes `7` and `10` are intentionally unused gaps left by prior variant removals —
 they are not reserved for anything and should not be inferred to mean "no error."
