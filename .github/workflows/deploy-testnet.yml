@@ -41,7 +41,7 @@ jobs:
         targets: wasm32v1-none
 
     - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
     - name: Install Stellar CLI
       run: |
@@ -58,9 +58,24 @@ jobs:
           cp "$contract" "release_artifacts/$filename"
         done
 
-    - name: Deploy Contract
+    - name: Configure deployer identity
       env:
         CONTRACT_DEPLOYER_SECRET: ${{ secrets.TESTNET_DEPLOYER_SECRET }}
+      run: |
+        if [ -z "$CONTRACT_DEPLOYER_SECRET" ]; then
+          echo "::warning::CONTRACT_DEPLOYER_SECRET is empty. Set the TESTNET_DEPLOYER_SECRET"
+          echo "::warning::secret on the 'testnet' environment. The deploy step will now stop"
+          echo "::warning::with actionable guidance from the deployment scripts."
+          exit 0
+        fi
+        # Create the Stellar CLI identity named 'deployer' that every
+        # deploy/initialize script signs with (--source deployer). The key is
+        # fed through stdin (stellar keys add reads it from a non-TTY stdin),
+        # never via argv or the workflow file, so it never reaches the logs.
+        printf '%s\n' "$CONTRACT_DEPLOYER_SECRET" | stellar keys add deployer --secret-key --overwrite
+        echo "Configured Stellar CLI identity 'deployer' -> $(stellar keys address deployer)"
+
+    - name: Deploy Contract
       run: |
         if [ "${{ github.event.inputs.contract }}" = "all" ]; then
           bash scripts/deploy-all-contracts.sh

@@ -43,6 +43,15 @@ fn reputation_down(score: u32, points: u32) -> u32 { score.saturating_sub(points
 const GOLD_TIER_THRESHOLD: u32 = 75;
 // Enterprise eligibility is intentionally tied to reaching the Gold tier.
 const ENTERPRISE_THRESHOLD: u32 = GOLD_TIER_THRESHOLD;
+// Lower bound of the Silver tier: a driver scoring at or above this value (but
+// below GOLD_TIER_THRESHOLD) is Silver; below it they are Bronze.
+const SILVER_TIER_THRESHOLD: u32 = 50;
+// A newly registered driver intentionally starts at the bottom of the Silver
+// tier. Deriving the starting score from SILVER_TIER_THRESHOLD makes that policy
+// explicit and keeps the two values coupled: the tier boundary and the starting
+// score can only ever move together, so neither can silently reclassify every
+// new driver relative to the other.
+const INITIAL_REPUTATION_SCORE: u32 = SILVER_TIER_THRESHOLD;
 const HEAVY_CARGO_GRAMS: u32 = 5000;
 const DEFAULT_BASE_POINTS: u32 = 5;
 const DEFAULT_HEAVY_CARGO_POINTS: u32 = 3;
@@ -219,7 +228,7 @@ impl IdentityReputationContract {
         let profile = DriverProfile {
             address: driver.clone(),
             deliveries_completed: 0,
-            reputation_score: 50,
+            reputation_score: INITIAL_REPUTATION_SCORE,
             registered_at: env.ledger().timestamp(),
             kyc_verified: false,
         };
@@ -415,7 +424,7 @@ impl IdentityReputationContract {
         let score = profile.reputation_score;
         if score >= GOLD_TIER_THRESHOLD {
             DriverTier::Gold
-        } else if score >= 50 {
+        } else if score >= SILVER_TIER_THRESHOLD {
             DriverTier::Silver
         } else {
             DriverTier::Bronze
