@@ -1637,8 +1637,12 @@ impl EscrowContract {
         );
 
         env.events().publish(
-            (events::escrow_refunded(&env), delivery_id),
-            (record.sender, record.amount),
+            (events::escrow_refunded(&env),),
+            shared_types::EscrowRefundedEvent {
+                delivery_id,
+                sender: record.sender,
+                amount: record.amount,
+            },
         );
     }
 

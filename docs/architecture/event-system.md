@@ -150,7 +150,13 @@ pub struct EscrowFundedEvent {
 ```
 
 #### `EscrowReleasedEvent`
-Emitted when locked escrow is released to the driver.
+Emitted when locked escrow is released to the driver. **All emitters of the `escrow_released` topic must use this struct.**
+
+| Emitter function | Path |
+|---|---|
+| `release_escrow` | normal recipient/admin release from `Locked` state |
+| `release_holdback_escrow` | settlement release from `Holdback` state (normal delivery path) |
+
 ```rust
 pub struct EscrowReleasedEvent {
     pub delivery_id: u64,
@@ -160,8 +166,16 @@ pub struct EscrowReleasedEvent {
 }
 ```
 
+Topic tuple: `(events::escrow_released(&env),)` — single-element, no delivery_id in topics.
+
 #### `EscrowRefundedEvent`
-Emitted when escrow is refunded to the sender.
+Emitted when escrow is refunded to the sender. **All emitters of the `escrow_refunded` topic must use this struct.**
+
+| Emitter function | Path |
+|---|---|
+| `refund_escrow` | explicit refund by sender or admin |
+| `reclaim_expired_escrow` | permissionless reclaim after TTL expiry |
+
 ```rust
 pub struct EscrowRefundedEvent {
     pub delivery_id: u64,
@@ -169,6 +183,8 @@ pub struct EscrowRefundedEvent {
     pub amount: i128,
 }
 ```
+
+Topic tuple: `(events::escrow_refunded(&env),)` — single-element, no delivery_id in topics.
 
 #### `DisputeResolvedEvent`
 Emitted by `escrow_contract` when an admin resolves a dispute (full payout or full refund).
@@ -336,6 +352,16 @@ Every contract that emits events must:
    ```
 
 Do **not** use inline `Symbol::new(env, "delivery_created")` in an event topic. That call belongs inside `shared_types::events` only.
+
+### Topic arity rule
+
+The topic tuple for every named event topic **must be a single-element tuple** — `(events::topic_name(&env),)`. Do **not** add `delivery_id` or any other value as a second topic element to create per-delivery filtering; that changes the topic arity and breaks consumers that decode the payload as the typed struct.
+
+If per-delivery topic filtering is required in the future, all emitters of that topic must be changed together so the shape stays uniform, and this document must be updated to reflect the new canonical layout.
+
+### Shape consistency rule
+
+When multiple functions emit the same topic, they **must all use the same typed payload struct**. Bare tuples are not permitted for topics that have a corresponding `#[contracttype]` struct in `shared_types`. This rule applies across all code paths — including rare and "normal path" emitters alike.
 
 ---
 
