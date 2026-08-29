@@ -216,7 +216,7 @@ FaniLab-SmartContract/
 1. **Sakinisha Rust na huduma za kaida:**
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   rustup target add wasm32-unknown-unknown
+   rustup target add wasm32v1-none
    ```
 
 2. **Sakinisha Stellar CLI:**
@@ -257,14 +257,14 @@ FaniLab-SmartContract/
    
    Kuundwa kwa mkataba wote:
    ```bash
-   cargo build --target wasm32-unknown-unknown --release
+   cargo build --target wasm32v1-none --release
    ```
    
    Kuundwa kwa mkataba mahususi:
    ```bash
-   cargo build -p escrow_contract --target wasm32-unknown-unknown --release
-   cargo build -p delivery_contract --target wasm32-unknown-unknown --release
-   cargo build -p dispute_resolution_contract --target wasm32-unknown-unknown --release
+   cargo build -p escrow_contract --target wasm32v1-none --release
+   cargo build -p delivery_contract --target wasm32v1-none --release
+   cargo build -p dispute_resolution_contract --target wasm32v1-none --release
    ```
    
    Kueneza mjihano:

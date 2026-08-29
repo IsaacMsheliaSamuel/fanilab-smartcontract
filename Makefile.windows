@@ -3,26 +3,26 @@
 
 # Build all contracts
 build:
-	cargo build --target wasm32-unknown-unknown --release
+	cargo build --target wasm32v1-none --release
 
 # Build specific contracts
 build-escrow:
-	cargo build -p escrow_contract --target wasm32-unknown-unknown --release
+	cargo build -p escrow_contract --target wasm32v1-none --release
 
 build-delivery:
-	cargo build -p delivery_contract --target wasm32-unknown-unknown --release
+	cargo build -p delivery_contract --target wasm32v1-none --release
 
 build-dispute:
-	cargo build -p dispute_resolution_contract --target wasm32-unknown-unknown --release
+	cargo build -p dispute_resolution_contract --target wasm32v1-none --release
 
 build-fleet:
-	cargo build -p fleet_management_contract --target wasm32-unknown-unknown --release
+	cargo build -p fleet_management_contract --target wasm32v1-none --release
 
 build-identity:
-	cargo build -p identity_reputation_contract --target wasm32-unknown-unknown --release
+	cargo build -p identity_reputation_contract --target wasm32v1-none --release
 
 build-settlement:
-	cargo build -p settlement_contract --target wasm32-unknown-unknown --release
+	cargo build -p settlement_contract --target wasm32v1-none --release
 
 # Run tests
 test:
@@ -53,6 +53,6 @@ clean:
 
 # Check compilation without building
 check:
-	cargo check --target wasm32-unknown-unknown
+	cargo check --target wasm32v1-none
 
 .PHONY: build test format lint audit coverage clean check

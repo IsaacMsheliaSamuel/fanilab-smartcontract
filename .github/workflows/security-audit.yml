@@ -13,6 +13,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Read-only: cargo-audit/cargo-deny and the dependency-review action only
+# need to read the checked-out tree and the PR dependency graph (#244).
+permissions:
+  contents: read
+
 jobs:
   security_audit:
     name: Security Audit
@@ -20,13 +25,13 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Rust toolchain
       uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
     - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
     - name: Install cargo-audit
       run: cargo install cargo-audit
@@ -47,8 +52,8 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Dependency Review
-      uses: actions/dependency-review-action@v3
+      uses: actions/dependency-review-action@v5
 

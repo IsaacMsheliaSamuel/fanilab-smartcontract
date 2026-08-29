@@ -24,6 +24,9 @@ pub enum FaniLabError {
     ProviderNotFound = 9,
     /// Protocol is paused and fund movements are halted.
     ProtocolPaused = 11,
+    /// Requested operation would exceed a fixed capacity/growth limit
+    /// (e.g. a bounded collection is already at its maximum length).
+    LimitExceeded = 12,
 }
 
 // Event topic constants for on-chain event tracking
@@ -107,6 +110,18 @@ pub mod events {
         Symbol::new(env, "fleet_deactivated")
     }
 
+    /// Emitted when the contract admin reassigns a fleet's owner address
+    /// (e.g. after the original owner key is lost or compromised).
+    pub fn fleet_owner_reassigned(env: &Env) -> Symbol {
+        Symbol::new(env, "fleet_owner_reassigned")
+    }
+
+    /// Emitted when the contract admin force-updates a fleet's treasury
+    /// address, bypassing the normal owner-initiated timelock flow.
+    pub fn fleet_treasury_force_updated(env: &Env) -> Symbol {
+        Symbol::new(env, "fleet_treasury_force_updated")
+    }
+
     // Dispute resolution events
     pub fn dispute_raised(env: &Env) -> Symbol {
         Symbol::new(env, "dispute_raised")
@@ -155,6 +170,44 @@ pub mod events {
 
     pub fn reputation_decreased(env: &Env) -> Symbol {
         Symbol::new(env, "reputation_decreased")
+    }
+
+    pub fn reputation_awarded(env: &Env) -> Symbol {
+        Symbol::new(env, "reputation_awarded")
+    }
+
+    // Protocol/admin lifecycle events. These previously used raw inline
+    // Symbol::new(&env, "PascalCase") calls at each contract's call site
+    // instead of going through this module, the one place in the codebase
+    // that mixed casing conventions for event topics (Issue #47).
+    pub fn protocol_initialized(env: &Env) -> Symbol {
+        Symbol::new(env, "protocol_initialized")
+    }
+
+    pub fn fee_updated(env: &Env) -> Symbol {
+        Symbol::new(env, "fee_updated")
+    }
+
+    pub fn settlement_contract_proposed(env: &Env) -> Symbol {
+        // Soroban Symbol values are capped at 32 bytes; the fuller
+        // "settlement_contract_change_proposed" (35 bytes) exceeds that.
+        Symbol::new(env, "settlement_contract_proposed")
+    }
+
+    pub fn settlement_contract_updated(env: &Env) -> Symbol {
+        Symbol::new(env, "settlement_contract_updated")
+    }
+
+    pub fn admin_transferred(env: &Env) -> Symbol {
+        Symbol::new(env, "admin_transferred")
+    }
+
+    pub fn protocol_pause_status_changed(env: &Env) -> Symbol {
+        Symbol::new(env, "protocol_pause_status_changed")
+    }
+
+    pub fn delivery_contract_initialized(env: &Env) -> Symbol {
+        Symbol::new(env, "delivery_contract_initialized")
     }
 }
 
@@ -326,6 +379,36 @@ pub struct FleetDeactivatedEvent {
     pub caller: Address,
 }
 
+/// Emitted by `admin_reassign_fleet_owner` — admin-initiated ownership
+/// transfer when the original owner key is lost or compromised.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetOwnerReassignedEvent {
+    /// Fleet whose ownership was reassigned.
+    pub fleet_id: u64,
+    /// Admin address that performed the reassignment.
+    pub admin: Address,
+    /// Previous owner address that was replaced.
+    pub old_owner: Address,
+    /// New owner address that was assigned.
+    pub new_owner: Address,
+}
+
+/// Emitted by `admin_force_update_treasury` — admin-initiated treasury
+/// override that bypasses the owner-initiated timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetTreasuryForceUpdatedEvent {
+    /// Fleet whose treasury was forcibly updated.
+    pub fleet_id: u64,
+    /// Admin address that performed the override.
+    pub admin: Address,
+    /// Previous treasury address.
+    pub old_treasury: Address,
+    /// New treasury address.
+    pub new_treasury: Address,
+}
+
 // ── Dispute resolution event payloads ────────────────────────────────────────
 
 #[contracttype]
@@ -432,6 +515,15 @@ pub struct ReputationDecreasedEvent {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReputationAwardedEvent {
+    /// Driver address that received a flat reputation award.
+    pub driver: Address,
+    /// Points added to the driver's reputation score (post-cap value may be lower).
+    pub points: u32,
+}
+
+#[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub struct DeliveryId(pub u64);
 
@@ -509,14 +601,6 @@ pub type EscrowStatus = EscrowState;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PartyAddresses {
-    pub sender: Address,
-    pub driver: Address,
-    pub recipient: Address,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolConfig {
     pub token: Address,
     pub platform_fee_bps: u32,
@@ -547,6 +631,32 @@ pub fn escrow_key(id: impl Into<DeliveryId>) -> StorageKey {
     StorageKey::Escrow(id.into())
 }
 
+/// Returns `true` when `caller` matches the admin stored under
+/// `StorageKey::Admin` in **instance** storage.
+///
+/// Returns `false` — rather than panicking — when the contract has not yet
+/// been initialised.  This is intentional: `escrow_contract`,
+/// `delivery_contract`, `fleet_management_contract`, and
+/// `identity_reputation_contract` all share this single source-of-truth so
+/// the pre-init behaviour is always consistent (ADR-003).
+///
+/// `dispute_resolution_contract` is the one exception: it supports multiple
+/// simultaneous admins with a last-admin-removal guard, a genuinely
+/// different governance model this single-admin helper cannot express, so
+/// it keeps its own `DataKey::Admin(Address)` + `DataKey::AdminList`
+/// implementation rather than being forced onto this function (Issue #77).
+pub fn is_admin(env: &soroban_sdk::Env, caller: &soroban_sdk::Address) -> bool {
+    if let Some(admin) = env
+        .storage()
+        .instance()
+        .get::<_, soroban_sdk::Address>(&StorageKey::Admin)
+    {
+        admin == *caller
+    } else {
+        false
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowRecord {
@@ -560,32 +670,14 @@ pub struct EscrowRecord {
     pub expires_at: Option<u64>,
     pub disputed_by: Option<Address>,
     pub disputed_at: Option<u64>,
+    /// Ledger timestamp at which the escrow entered `EscrowState::Holdback`
+    /// via `mark_holdback_escrow`. `None` until then (and for escrows that
+    /// never reach `Holdback`). Used by `release_expired_holdback` to permit
+    /// a permissionless payout to the driver once the admin-configurable
+    /// holdback window has elapsed, so a passive recipient can no longer
+    /// strand driver funds indefinitely (Issue #192).
+    pub holdback_started_at: Option<u64>,
     pub fleet_id: Option<u64>,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeliveryDetails {
-    pub id: DeliveryId,
-    pub driver: String,
-    pub status: DeliveryStatus,
-}
-
-/// Lifecycle status for a driver profile.
-///
-/// `Active` is the initial state for every newly registered driver.
-/// `Suspended` is set by an admin via `suspend_driver` and can be reversed
-/// with `reinstate_driver`.  The profile record is **never deleted** — this
-/// preserves audit history and prevents a suspended driver from re-registering
-/// to reset their score (register_driver panics if a profile already exists).
-#[contracttype]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum DriverStatus {
-    /// Driver is registered and may participate in the protocol.
-    Active,
-    /// Driver has been administratively suspended; profile is preserved for
-    /// audit purposes but the driver may not accept new assignments.
-    Suspended,
 }
 
 #[contracttype]
@@ -608,21 +700,96 @@ pub struct UserProfile {
     pub registered_at: u64,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CargoCategory {
+    Documents,
+    Electronics,
+    Perishables,
+    Clothing,
+    General,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CargoDescriptor {
+    pub weight_grams: u32,
+    pub category: CargoCategory,
+    pub fragile: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryMetadata {
+    /// Not caller-authoritative: `delivery_contract` overwrites this with
+    /// the internally generated `DeliveryId` on every create/update call,
+    /// discarding whatever value the caller supplied. Kept as a field
+    /// (rather than removed) so a `DeliveryMetadata` read back from storage
+    /// is self-describing without a second lookup.
+    pub delivery_id: u64,
+    pub origin: String,
+    pub destination: String,
+    pub cargo_description: CargoDescriptor,
+    pub created_at: u64,
+    pub estimated_delivery: u64,
+}
+
 #[cfg(test)]
 mod test {
     use super::{
         delivery_key, escrow_key, CargoCategory, CargoDescriptor, DeliveryConfirmedEvent,
         DeliveryCreatedEvent, DeliveryDisputedEvent, DeliveryId, DeliveryMetadata, DeliveryRecord,
-        DeliveryStatus, DisputeRaisedEvent, DisputeResolvedEvent, DisputeResolvedPayoutEvent,
-        DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, DriverAssignedEvent,
-        DriverInvitedEvent, DriverProfile, DriverRegisteredEvent, DriverRemovedEvent,
-        DriverStatus, EscrowFundedEvent, EscrowRecord, EscrowRefundedEvent, EscrowReleasedEvent,
-        EscrowState, FaniLabError, FleetRegisteredEvent, FleetTreasuryUpdatedEvent,
-        InviteAcceptedEvent, KycStatusUpdatedEvent, PartyAddresses, ProtocolConfig,
-        ReputationDecreasedEvent, ReputationIncreasedEvent, StorageKey, UserProfile,
-        UserRegisteredEvent,
+        DeliveryStatus, DriverAssignedEvent, DriverProfile, EscrowFundedEvent, EscrowRecord,
+        EscrowRefundedEvent, EscrowReleasedEvent, EscrowState, FaniLabError, ProtocolConfig,
+        StorageKey, UserProfile,
     };
-    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    use soroban_sdk::{contract, testutils::Address as _, Address, Env, String};
+
+    // `is_admin` is a free function reading instance storage, which SDK 27
+    // only allows from within a contract's execution context — this minimal
+    // contract exists solely to give these unit tests one to run inside via
+    // `env.as_contract(...)`.
+    #[contract]
+    struct TestContract;
+
+    #[test]
+    fn is_admin_returns_false_before_init() {
+        // Verify that is_admin returns false (not panics) when called before
+        // the contract has been initialised — i.e. when StorageKey::Admin is
+        // absent from instance storage.  This test pins the pre-init
+        // behaviour so both escrow_contract and delivery_contract are
+        // consistent (issue #68).
+        let env = Env::default();
+        let contract_id = env.register(TestContract, ());
+        let caller = Address::generate(&env);
+        // StorageKey::Admin was never written — is_admin must return false.
+        let result = env.as_contract(&contract_id, || super::is_admin(&env, &caller));
+        assert!(!result, "is_admin should return false when uninitialized");
+    }
+
+    #[test]
+    fn is_admin_returns_true_for_matching_admin() {
+        let env = Env::default();
+        let contract_id = env.register(TestContract, ());
+        let admin = Address::generate(&env);
+        // Manually store the admin as the contract would during `init`.
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&StorageKey::Admin, &admin);
+        });
+        assert!(env.as_contract(&contract_id, || super::is_admin(&env, &admin)));
+    }
+
+    #[test]
+    fn is_admin_returns_false_for_non_admin() {
+        let env = Env::default();
+        let contract_id = env.register(TestContract, ());
+        let admin = Address::generate(&env);
+        let other = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&StorageKey::Admin, &admin);
+        });
+        assert!(!env.as_contract(&contract_id, || super::is_admin(&env, &other)));
+    }
 
     #[test]
     fn delivery_id_wraps_raw_u64() {
@@ -646,23 +813,6 @@ mod test {
         assert_eq!(EscrowState::Refunded, EscrowState::Refunded);
         assert_eq!(EscrowState::Paused, EscrowState::Paused);
         assert_eq!(EscrowState::Split, EscrowState::Split);
-    }
-
-    #[test]
-    fn party_addresses_preserve_fields() {
-        let env = Env::default();
-        let sender = Address::generate(&env);
-        let driver = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        let party_addresses = PartyAddresses {
-            sender: sender.clone(),
-            driver: driver.clone(),
-            recipient: recipient.clone(),
-        };
-
-        assert_eq!(party_addresses.sender, sender);
-        assert_eq!(party_addresses.driver, driver);
-        assert_eq!(party_addresses.recipient, recipient);
     }
 
     #[test]
@@ -830,7 +980,7 @@ mod test {
             fragile: true,
         };
         assert_eq!(desc.weight_grams, 500);
-        assert_eq!(desc.fragile, true);
+        assert!(desc.fragile);
         assert_eq!(desc.category, CargoCategory::Electronics);
     }
 
@@ -933,6 +1083,7 @@ mod test {
             expires_at: Some(8000000),
             disputed_by: Some(disputed_by.clone()),
             disputed_at: Some(7500000),
+            holdback_started_at: Some(7200000),
             fleet_id: Some(42),
         };
 
@@ -946,6 +1097,7 @@ mod test {
         assert_eq!(record.expires_at, Some(8000000));
         assert_eq!(record.disputed_by, Some(disputed_by));
         assert_eq!(record.disputed_at, Some(7500000));
+        assert_eq!(record.holdback_started_at, Some(7200000));
         assert_eq!(record.fleet_id, Some(42));
     }
 
@@ -966,7 +1118,7 @@ mod test {
         assert_eq!(profile.deliveries_completed, 12);
         assert_eq!(profile.reputation_score, 85);
         assert_eq!(profile.registered_at, 1000000);
-        assert_eq!(profile.kyc_verified, true);
+        assert!(profile.kyc_verified);
     }
 
     #[test]
@@ -980,105 +1132,5 @@ mod test {
 
         assert_eq!(profile.address, address);
         assert_eq!(profile.registered_at, 2000000);
-    }
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CargoCategory {
-    Documents,
-    Electronics,
-    Perishables,
-    Clothing,
-    General,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CargoDescriptor {
-    pub weight_grams: u32,
-    pub category: CargoCategory,
-    pub fragile: bool,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeliveryMetadata {
-    pub delivery_id: u64,
-    pub origin: String,
-    pub destination: String,
-    pub cargo_description: CargoDescriptor,
-    pub created_at: u64,
-    pub estimated_delivery: u64,
-}
-
-pub mod governance {
-    use soroban_sdk::{Address, Env, Vec};
-
-    #[contracttype]
-    #[derive(Clone)]
-    pub enum AdminDataKey {
-        SingleAdmin,
-        AdminSet,
-    }
-
-    pub struct AdminManager;
-
-    impl AdminManager {
-        pub fn is_single_admin(env: &Env, caller: &Address, storage_key: &AdminDataKey) -> bool {
-            if let Some(admin) = env.storage().instance().get::<_, Address>(storage_key) {
-                *caller == admin
-            } else {
-                false
-            }
-        }
-
-        pub fn is_multi_admin(env: &Env, caller: &Address, storage_key: &AdminDataKey) -> bool {
-            if let Some(admins) = env.storage().instance().get::<_, Vec<Address>>(storage_key) {
-                admins.iter().any(|a| a == *caller)
-            } else {
-                false
-            }
-        }
-
-        pub fn list_admins(env: &Env, storage_key: &AdminDataKey) -> Vec<Address> {
-            env.storage()
-                .instance()
-                .get::<_, Vec<Address>>(storage_key)
-                .unwrap_or_else(|| Vec::new(env))
-        }
-
-        pub fn add_admin_to_set(env: &Env, new_admin: Address, storage_key: &AdminDataKey) {
-            let mut admins: Vec<Address> = env
-                .storage()
-                .instance()
-                .get(storage_key)
-                .unwrap_or_else(|| Vec::new(env));
-
-            if !admins.iter().any(|a| a == new_admin) {
-                admins.push_back(new_admin);
-                env.storage().instance().set(storage_key, &admins);
-            }
-        }
-
-        pub fn remove_admin_from_set(
-            env: &Env,
-            old_admin: Address,
-            storage_key: &AdminDataKey,
-        ) {
-            let admins: Vec<Address> = env
-                .storage()
-                .instance()
-                .get(storage_key)
-                .unwrap_or_else(|| Vec::new(env));
-
-            let mut new_admins = Vec::new(env);
-            for admin in admins.iter() {
-                if admin != old_admin {
-                    new_admins.push_back(admin);
-                }
-            }
-            env.storage().instance().set(storage_key, &new_admins);
-        }
     }
 }

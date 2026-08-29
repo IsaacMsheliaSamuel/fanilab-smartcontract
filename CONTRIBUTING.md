@@ -36,7 +36,7 @@ You will need the following installed:
 *   **Rust**: Latest stable toolchain. `https://www.rust-lang.org/tools/install`
 *   **WASM Target**: Required for compiling Soroban contracts.
     ```bash
-    rustup target add wasm32-unknown-unknown
+    rustup target add wasm32v1-none
     ```
 *   **Stellar CLI**: For compiling, deploying, and invoking contracts.
     ```bash
@@ -61,12 +61,12 @@ make build-dispute
 **For Windows Users (or users without Make):**
 ```bash
 # Build all contracts
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 
 # Build specific contracts
-cargo build -p escrow_contract --target wasm32-unknown-unknown --release
-cargo build -p delivery_contract --target wasm32-unknown-unknown --release
-cargo build -p dispute_resolution_contract --target wasm32-unknown-unknown --release
+cargo build -p escrow_contract --target wasm32v1-none --release
+cargo build -p delivery_contract --target wasm32v1-none --release
+cargo build -p dispute_resolution_contract --target wasm32v1-none --release
 ```
 
 ## Testing Guidelines
@@ -112,6 +112,44 @@ When looking for something to work on, please check the GitHub Issues tab. We hi
     cargo fmt --all
     ```
 4.  **Submit your PR** to the `main` branch. Provide a clear description of what your changes do, which issues they resolve, and any new cross-contract dependencies introduced.
+
+## Pinning GitHub Actions
+
+Every `uses:` entry in `.github/workflows/` **must be pinned to a full 40-character
+commit SHA**, with the human-readable version left as a trailing comment:
+
+```yaml
+uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+```
+
+Rationale: a mutable tag such as `@v1` or `@main` can be repointed to a different
+commit by the action's maintainer (or an attacker who compromises that account)
+at any time. The release workflow in particular runs a third-party action with a
+`GITHUB_TOKEN` that can write repository contents and publish the exact binaries
+users verify by checksum, so a floating tag there is an unacceptable
+supply-chain risk. Pinning by SHA freezes the code that actually runs.
+
+Rules:
+
+1. **All actions**, first-party (`actions/*`, `github/*`) and third-party alike,
+   are pinned by SHA. One policy, no exceptions, so a reviewer never has to
+   reason about which entries are "trusted enough" to float.
+2. The trailing `# vX.Y.Z` comment is **required**. It is what makes the pin
+   readable in review and is the version string Dependabot rewrites on bump.
+3. Pin to the SHA a released tag points at — not an arbitrary commit on `main`.
+   Get it with:
+   ```bash
+   gh api repos/<owner>/<repo>/tags --jq '.[] | "\(.name) \(.commit.sha)"'
+   ```
+4. Prefer the latest patch release within the major version already in use.
+   Bumping to a new **major** version is a deliberate change: do it in its own
+   commit and call out any behavior differences in the PR description.
+5. Keeping pins current is automated: `.github/dependabot.yml` runs the
+   `github-actions` ecosystem weekly and opens PRs that update both the SHA and
+   the version comment. Do not disable it.
+
+When you add or change a workflow, run a quick self-check that every `uses:`
+line has a 40-hex-character ref and a version comment before opening the PR.
 
 ## License
 

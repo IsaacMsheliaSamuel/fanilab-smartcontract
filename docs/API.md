@@ -42,7 +42,7 @@ These indexes are automatically maintained by the respective contracts and are b
 - `get_escrows_by_driver(driver: Address) -> Vec<u64>` — all escrow delivery IDs for driver
 
 **Fleet Management Contract:**
-- `get_fleet_roster(fleet_id: FleetId) -> Vec<Address>` — all drivers in a fleet
+- `get_fleet_roster(fleet_id: FleetId) -> Vec<Address>` — active drivers in a fleet
 
 ### Interim: Event-Replay Indexing
 
@@ -161,6 +161,84 @@ Configure settlement contract for currency swaps.
 - `settlement_contract: Address` - Settlement contract address
 
 **Authorization:** Admin only
+
+#### `clear_settlement_contract`
+Unset a previously configured settlement contract. After clearing,
+`get_settlement_contract` returns `None` and payouts stop routing through
+settlement swaps. Also removes any pending (timelocked) settlement-contract
+change. Clearing when nothing is configured is a no-op that still succeeds.
+
+**Parameters:**
+- `admin: Address` - Admin address
+
+**Authorization:** Admin only
+
+#### `set_fleet_management_contract`
+Configure the fleet-management contract consulted during driver payouts. When
+set, `payout_driver` calls `get_payout_address(driver, fleet_id)` on it for any
+escrow that carries a `fleet_id` and sends the driver's earnings to the address
+it returns.
+
+**Parameters:**
+- `admin: Address` - Admin address
+- `fleet_contract: Address` - Fleet-management contract address
+
+**Authorization:** Admin only
+
+#### `clear_fleet_management_contract`
+Unset a previously configured fleet-management contract (Issue #239), mirroring
+`clear_settlement_contract`. After clearing, `get_fleet_management_contract`
+returns `None` and payouts for fleet-linked escrows fall back to paying the
+driver directly instead of routing through a cross-contract
+`get_payout_address` call. Clearing when nothing is configured is a no-op that
+still succeeds.
+
+**Parameters:**
+- `admin: Address` - Admin address
+
+**Authorization:** Admin only
+
+**Note — no `clear_dispute_resolution_contract`:** `set_dispute_resolution_contract`
+deliberately has no clearing counterpart. `freeze_funds` pins its caller to the
+configured dispute-resolution contract and reads that address expecting it to be
+present, so unsetting it would permanently disable the protocol's ability to
+freeze a suspicious escrow. The intended remedy for a misbehaving dispute
+contract is to repoint it with `set_dispute_resolution_contract`, not to remove
+the integration.
+
+#### `set_paused`
+Emergency circuit breaker. When paused, blocks every operation that creates a
+new escrow or moves funds out of the contract.
+
+**Parameters:**
+- `admin: Address` - Admin address
+- `paused: bool` - New pause state
+
+**Authorization:** Admin only
+
+**Blocked while paused:** `create_escrow`, `create_escrows_batch`,
+`mark_holdback_escrow`, `release_escrow`, `refund_escrow`, `resolve_dispute`,
+`resolve_dispute_split`, `release_holdback_escrow`, `reclaim_expired_escrow`
+— each panics with `ProtocolPaused` (error code 11).
+
+**Remains available while paused:** `freeze_funds` and `raise_dispute`
+(neither moves funds — both only transition an escrow into the disputed
+`Paused` state, so admins/the dispute contract can still flag a suspicious
+escrow during an incident) and `sweep_untracked_balance` (already
+restricted to admin-only, used for recovering stray token balances).
+
+**Example:**
+```rust
+escrow_contract.set_paused(&admin_address, true);  // halt fund movement
+escrow_contract.set_paused(&admin_address, false); // resume
+```
+
+#### `is_paused`
+Returns the current protocol pause state.
+
+**Parameters:** None
+
+**Returns:** `bool`
 
 ### Escrow Lifecycle
 
@@ -347,6 +425,12 @@ Returns settlement contract address if configured.
 
 **Returns:** `Option<Address>`
 
+#### `get_fleet_management_contract`
+Returns the configured fleet-management contract address, or `None` if none is
+set or it has been cleared with `clear_fleet_management_contract`.
+
+**Returns:** `Option<Address>`
+
 #### `get_escrow`
 Retrieve full escrow record.
 
@@ -359,12 +443,13 @@ Retrieve full escrow record.
 - `DeliveryNotFound` - No escrow for this delivery
 
 #### `create_escrows_batch`
-Create multiple escrows in a single transaction (up to 100 per batch).
+Create multiple escrows in a single transaction (up to 100 per batch). Enforces
+the same token and amount validation as `create_escrow`.
 
 **Parameters:**
 - `sender: Address` - Sender funding all escrows
 - `recipient: Address` - Delivery recipient (shared for all)
-- `token: Address` - Token for all escrows
+- `token: Address` - Token for all escrows; must match the protocol-configured token
 - `escrow_list: Vec<(u64, Address, i128)>` — tuples of (delivery_id, driver, amount)
 
 **Authorization:** Sender
@@ -372,10 +457,14 @@ Create multiple escrows in a single transaction (up to 100 per batch).
 **Returns:** `u32` — count of escrows created
 
 **Errors:**
+- `InvalidToken` - Token does not match the protocol-configured token
+- `InvalidAmount` - Any element's amount is not positive
 - `DuplicateDelivery` - Escrow already exists for any delivery_id
 - `InvalidState` - Batch size exceeds 100
 
 **Events:** `escrow_funded` (once per escrow)
+
+> **IMPORTANT — Integration Requirement:** This function is designed to pair with `delivery_contract::create_deliveries_batch`. The delivery IDs passed in `escrow_list` must have been created by `create_deliveries_batch` first. Call this function after receiving delivery IDs from the batch delivery creation, passing (delivery_id, driver, amount) tuples for each delivery that needs escrow backing.
 
 #### `get_escrows_by_sender`
 Get all escrow delivery IDs initiated by a sender.
@@ -628,6 +717,13 @@ Create multiple deliveries in a single transaction (up to 100 per batch).
 - Stores delivery records with Pending status
 - Updates secondary indexes for sender and recipient
 
+> **IMPORTANT — Integration Requirement:** This function creates delivery records only; it does NOT create escrows. Escrow creation must be performed as a separate operation using `escrow_contract::create_escrows_batch`. The two operations must be paired in sequence:
+>
+> 1. Call `create_deliveries_batch` → returns `Vec<DeliveryId>`
+> 2. Call `escrow_contract::create_escrows_batch` with the returned delivery IDs and (driver, amount) pairs
+>
+> Deliveries without escrows will fail at driver assignment or confirmation stages with `DeliveryNotFound` errors. The ordering constraint exists because delivery IDs must be known before escrows can reference them.
+
 #### `get_deliveries_by_sender`
 Get all delivery IDs initiated by a sender.
 
@@ -652,6 +748,19 @@ Get driver statistics and reputation.
 
 **Returns:** `DriverProfile`
 
+#### `get_escrow_contract`
+Return the escrow_contract address this delivery_contract was initialised with.
+
+**Returns:** `Address`
+
+**Errors:**
+- `NotInitialized` - Contract has not been initialized
+
+#### `get_identity_reputation_contract`
+Return the configured identity_reputation_contract address, if any.
+
+**Returns:** `Option<Address>`
+
 ---
 
 ## Dispute Resolution Contract
@@ -672,6 +781,14 @@ pub enum DisputeStatus {
 }
 ```
 
+#### `EvidenceEntry`
+```rust
+pub struct EvidenceEntry {
+    pub submitter: Address,     // Party that submitted this hash
+    pub hash:      BytesN<32>,  // SHA-256 hash of the evidence document/image
+}
+```
+
 #### `DisputeCase`
 ```rust
 pub struct DisputeCase {
@@ -679,7 +796,9 @@ pub struct DisputeCase {
     pub status:          DisputeStatus,
     pub raised_at:       u64,
     pub raised_by:       Address,
-    pub evidence_hashes: Vec<BytesN<32>>,
+    pub evidence_hashes: Vec<EvidenceEntry>,  // recorded with the submitting party
+    pub resolved_at:     Option<u64>,
+    pub resolved_by:     Option<Address>,
 }
 ```
 
@@ -692,12 +811,14 @@ Initialize the dispute resolution contract.
 - `admin: Address` - Initial admin address
 - `delivery_contract: Address` - Address of the delivery contract
 - `escrow_contract: Address` - Address of the escrow contract
-- `dispute_time_limit: u64` - Seconds after delivery within which a dispute may be raised
+- `dispute_time_limit: u64` - Seconds after delivery within which a dispute may be raised (must be ≥ `MIN_DISPUTE_TIME_LIMIT`, 1 day)
+- `dispute_resolution_limit: u64` - Seconds a dispute may stay `Open` before any party may `force_resolve_dispute` (must be ≥ `MIN_DISPUTE_RESOLUTION_LIMIT`, 1 day)
 
 **Authorization:** Contract deployer
 
 **Errors:**
 - `AlreadyInitialized` - Contract has already been initialized
+- `InvalidState` - `dispute_time_limit` or `dispute_resolution_limit` is below its floor
 
 ### Admin Operations
 
@@ -824,21 +945,22 @@ Open a dispute for an active, in-transit, or recently delivered delivery.
 Attach a SHA-256 evidence hash to an open dispute.
 
 **Parameters:**
-- `caller: Address` - Sender or recipient submitting evidence
+- `caller: Address` - Sender, recipient, or driver submitting evidence
 - `delivery_id: DeliveryId` - Delivery identifier
 - `evidence_hash: BytesN<32>` - SHA-256 hash of the evidence document/image
 
-**Authorization:** Delivery sender or recipient
+**Authorization:** Delivery sender, recipient, or driver
 
 **Errors:**
 - `DeliveryNotFound` - No dispute exists for this delivery
-- `InvalidState` - Dispute is not in `Open` status
-- `Unauthorized` - Caller is neither sender nor recipient
+- `InvalidState` - Dispute is not in `Open` status, or the calling party has already submitted this exact hash
+- `Unauthorized` - Caller is not a party to the delivery
+- `LimitExceeded` - The calling party has reached its per-party quota of 20 evidence hashes for this dispute
 
 **Events:** `evidence_added`
 
 **State Changes:**
-- Appends `evidence_hash` to `DisputeCase.evidence_hashes`
+- Appends `EvidenceEntry { submitter: caller, hash: evidence_hash }` to `DisputeCase.evidence_hashes`. The 20-hash cap is enforced **per submitting party**, so one party can neither exhaust another's quota nor lock the counterparty out.
 
 #### `resolve_dispute_refund_sender`
 Admin verdict: full refund to sender. Applies a reputation penalty to the driver.
@@ -1256,14 +1378,16 @@ Manages on-chain driver and user profiles, KYC status, and reputation scoring.
 ### Types
 
 #### `UserProfile`
+Defined once in `shared_types` and imported here (no local redeclaration).
 ```rust
 pub struct UserProfile {
-    pub address:   Address,
-    pub join_date: u64,
+    pub address:       Address,
+    pub registered_at: u64,
 }
 ```
 
 #### `DriverProfile`
+Defined once in `shared_types` and imported here (no local redeclaration).
 ```rust
 pub struct DriverProfile {
     pub address:               Address,
@@ -1504,6 +1628,14 @@ Retrieve a user's profile.
 **Errors:**
 - `ProviderNotFound` - User profile does not exist
 
+#### `has_user_profile`
+Check whether a user profile exists.
+
+**Parameters:**
+- `user: Address` - User address
+
+**Returns:** `bool`
+
 ### Reputation Management
 
 #### `increase_reputation`
@@ -1567,6 +1699,39 @@ identity_contract.decrease_reputation(
     &dispute_contract,
     &driver,
     10u32  // deduct 10 points
+);
+```
+
+#### `award_reputation`
+Add a flat reputation credit to a driver — used when a dispute is resolved in the
+driver's favour. Unlike `increase_reputation`, this does **not** derive points
+from cargo attributes and does **not** increment `deliveries_completed` (a dispute
+ruling is not a delivery completion, and counting it as one would double-count if
+the delivery is later confirmed).
+
+**Parameters:**
+- `caller: Address` - Must be the delivery contract or dispute contract
+- `driver: Address` - Driver whose score is being credited
+- `points: u32` - Number of reputation points to add
+
+**Authorization:** Delivery contract or dispute contract only
+
+**Errors:**
+- `Unauthorized` - Caller is not an authorized contract
+- `ProviderNotFound` - Driver profile does not exist
+
+**Events:** `reputation_awarded`
+
+**State Changes:**
+- Increases `reputation_score` by `points`, capped at 100
+- Leaves `deliveries_completed` unchanged
+
+**Example:**
+```rust
+identity_contract.award_reputation(
+    &dispute_contract,
+    &driver,
+    5u32  // flat dispute reward
 );
 ```
 
@@ -1802,6 +1967,7 @@ pub enum FaniLabError {
     DuplicateDelivery = 8,      // Delivery ID exists
     ProviderNotFound = 9,       // Driver not found
     ProtocolPaused = 11,        // Protocol paused, fund movements halted
+    LimitExceeded = 12,         // A bounded collection is already at its max length
 }
 ```
 
@@ -1834,58 +2000,14 @@ All contract functions that can fail return Soroban errors via `panic_with_error
 ### Error Codes by Contract
 
 A raw Soroban error (`Error(Contract, #N)`) only carries a numeric code — the meaning of that
-code depends on which contract raised it. Each contract below defines its own `#[contracterror]`
-enum starting from `1`, so the same number means different things in different contracts. This
-table consolidates every error variant in the workspace, labeled by originating contract, so an
-integrator handling errors from a multi-contract call chain can look up any `(contract, code)`
-pair in one place.
+code depends on which contract raised it. Each contract defines its own `#[contracterror]`
+enum starting from `1`, so the same number means different things in different contracts.
 
-#### `FaniLabError` — shared across all contracts (`shared_types`)
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `Unauthorized` | Caller is not authorized to perform the requested action. |
-| 2 | `AlreadyInitialized` | Contract or protocol state has already been initialized. |
-| 3 | `NotInitialized` | Contract or protocol state has not been initialized yet. |
-| 4 | `DeliveryNotFound` | Delivery record or related escrow entry could not be found. |
-| 5 | `InvalidState` | Requested operation is invalid for the current protocol state. |
-| 6 | `InsufficientFunds` | Contract balance is too low to complete the requested transfer. |
-| 8 | `DuplicateDelivery` | Delivery identifier already exists in protocol storage. |
-| 9 | `ProviderNotFound` | Provider or driver record could not be found. |
-| 11 | `ProtocolPaused` | Protocol is paused and fund movements are halted. |
-
-#### `EscrowError` — `escrow_contract`
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `InvalidState` | Requested operation is invalid for the escrow's current state. |
-| 2 | `DeliveryNotFound` | No escrow exists for the given delivery ID. |
-| 3 | `InsufficientFunds` | Escrow balance is too low to complete the requested transfer. |
-| 4 | `DuplicateDelivery` | An escrow already exists for the given delivery ID. |
-| 5 | `InvalidFee` | Requested platform fee exceeds the configured maximum. |
-| 6 | `InvalidToken` | Token does not match the protocol-configured token.* |
-| 6 | `InvalidAmount` | Escrow amount is not positive.* |
-
-\* `InvalidToken` and `InvalidAmount` share discriminant `6`; the raw code alone cannot
-distinguish between them.
-
-#### `DeliveryError` — `delivery_contract`
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `InvalidState` | Requested delivery status transition is not permitted. |
-| 2 | `InvalidMetadata` | Delivery metadata fails validation (e.g. location or weight limits). |
-
-#### `FleetError` — `fleet_management_contract`
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 1 | `AlreadyInitialized` | Contract has already been initialized. |
-| 2 | `NotInitialized` | Contract has not been initialized yet. |
-| 3 | `Unauthorized` | Caller is not authorized to perform the requested action. |
-| 4 | `FleetNotFound` | No fleet exists for the given fleet ID. |
-| 5 | `DriverAlreadyInvited` | Driver already has a pending invite to this fleet. |
-| 6 | `InviteNotFound` | No pending invite exists for the given driver. |
-| 7 | `DriverAlreadyActive` | Driver is already an active member of this fleet. |
-| 8 | `NoPendingTreasuryChange` | No proposed treasury change is pending confirmation. |
-| 9 | `TimelockNotElapsed` | Proposed treasury change's timelock has not yet elapsed. |
-| 10 | `FleetInactive` | Fleet has been deactivated and no longer accepts this operation. |
+The full, canonical table of every error variant in the workspace — labeled by originating
+contract, so an integrator handling errors from a multi-contract call chain can look up any
+`(contract, code)` pair in one place — lives in **[`docs/ERROR_CODES.md`](./ERROR_CODES.md)**.
+That file is the single source of truth; update it (not this section) when error variants
+change.
 
 ---
 
