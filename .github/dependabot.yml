@@ -16,7 +16,11 @@ updates:
       prefix: "chore"
       include: "scope"
   
-  # Maintain dependencies for GitHub Actions
+  # Maintain dependencies for GitHub Actions.
+  # Every `uses:` entry in .github/workflows/ is pinned to a full commit SHA
+  # (see the "Pinning GitHub Actions" section in CONTRIBUTING.md).
+  # Dependabot understands SHA pins with a trailing `# vX.Y.Z` comment and will
+  # open PRs that bump both the SHA and the comment, so pins do not go stale.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

@@ -1,12 +1,33 @@
 extern crate std;
 
 use super::*;
+use delivery_contract::DeliveryContract;
 use escrow_contract::EscrowContract;
 use identity_reputation_contract::IdentityReputationContract;
+use shared_types::{CargoCategory, CargoDescriptor, DeliveryMetadata, DeliveryStatus, EscrowStatus};
 use soroban_sdk::{
-    testutils::{Address as _, Events},
-    Address, Env, Symbol, TryFromVal,
+    testutils::{Address as _, Events, Ledger as _},
+    xdr, Address, Env, Symbol, TryFromVal, TryIntoVal, Val,
 };
+
+/// Decode the most recently published event into the (contract, topics, data)
+/// shape the SDK <27 `env.events().all()` used to return directly, since
+/// SDK 27's `ContractEvents` only exposes the raw XDR form.
+fn last_event(env: &Env) -> (Address, soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    let raw = events.events().last().expect("no events emitted").clone();
+    let contract_id = raw.contract_id.expect("event missing contract id");
+    let address: Address = xdr::ScVal::Address(xdr::ScAddress::Contract(contract_id))
+        .try_into_val(env)
+        .expect("failed to decode contract address");
+    let xdr::ContractEventBody::V0(body) = raw.body;
+    let mut topics = soroban_sdk::Vec::new(env);
+    for topic in body.topics.iter() {
+        topics.push_back(Val::try_from_val(env, topic).expect("failed to decode topic"));
+    }
+    let data = Val::try_from_val(env, &body.data).expect("failed to decode event data");
+    (address, topics, data)
+}
 
 fn setup_test() -> (Env, FleetManagementContractClient<'static>, Address) {
     let env = Env::default();
@@ -39,7 +60,7 @@ fn test_init_sets_admin_and_counter() {
     let (env, client, admin) = setup_test();
 
     let stored_admin: Address = env.as_contract(&client.address, || {
-        env.storage().instance().get(&DataKey::Admin).unwrap()
+        env.storage().instance().get(&StorageKey::Admin).unwrap()
     });
     assert_eq!(stored_admin, admin);
 
@@ -104,17 +125,88 @@ fn test_register_fleet_emits_event() {
     let treasury = Address::generate(&env);
     let fleet_id = client.register_fleet(&owner, &treasury);
 
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = last_event(&env);
 
     assert_eq!(last_event.0, client.address.clone());
 
     let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
     assert_eq!(topic0, Symbol::new(&env, "fleet_registered"));
 
-    let data: (FleetId, Address, Address) =
-        <(FleetId, Address, Address)>::try_from_val(&env, &last_event.2).unwrap();
-    assert_eq!(data, (fleet_id, owner, treasury));
+    let data: FleetRegisteredEvent =
+        FleetRegisteredEvent::try_from_val(&env, &last_event.2).unwrap();
+    assert_eq!(data.fleet_id, fleet_id);
+    assert_eq!(data.owner, owner);
+    assert_eq!(data.treasury, treasury);
+}
+
+#[test]
+fn test_admin_reassign_fleet_owner_resets_signers() {
+    let (env, client, admin) = setup_test();
+    let (fleet_id, owner, treasury) = register_fleet(&env, &client);
+    let signer2 = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(owner.clone());
+    signers.push_back(signer2);
+    client.configure_signers(&owner, &fleet_id, &signers, &2u32);
+
+    client.admin_reassign_fleet_owner(&admin, &fleet_id, &new_owner);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.owner, new_owner);
+    assert_eq!(profile.treasury, treasury);
+    assert_eq!(profile.signers.len(), 1u32);
+    assert_eq!(profile.signers.get(0).unwrap(), new_owner);
+    assert_eq!(profile.signature_threshold, 1u32);
+}
+
+#[test]
+fn test_admin_reassign_fleet_owner_requires_admin() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, owner, _treasury) = register_fleet(&env, &client);
+    let attacker = Address::generate(&env);
+    let new_owner = Address::generate(&env);
+
+    let result = client.try_admin_reassign_fleet_owner(&attacker, &fleet_id, &new_owner);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::Unauthorized.into()),
+        _ => panic!("Expected FleetError::Unauthorized"),
+    }
+
+    assert_eq!(client.get_fleet(&fleet_id).owner, owner);
+}
+
+#[test]
+fn test_admin_force_update_treasury_bypasses_timelock_and_clears_pending_change() {
+    let (env, client, admin) = setup_test();
+    let (fleet_id, owner, old_treasury) = register_fleet(&env, &client);
+    let proposed_treasury = Address::generate(&env);
+    let emergency_treasury = Address::generate(&env);
+
+    client.update_fleet_treasury(&owner, &fleet_id, &proposed_treasury);
+    client.admin_force_update_treasury(&admin, &fleet_id, &emergency_treasury);
+
+    let profile = client.get_fleet(&fleet_id);
+    assert_eq!(profile.treasury, emergency_treasury);
+    assert_ne!(profile.treasury, old_treasury);
+    assert_eq!(client.get_pending_treasury_update(&fleet_id), None);
+}
+
+#[test]
+fn test_admin_force_update_treasury_requires_admin() {
+    let (env, client, _admin) = setup_test();
+    let (fleet_id, _owner, treasury) = register_fleet(&env, &client);
+    let attacker = Address::generate(&env);
+    let new_treasury = Address::generate(&env);
+
+    let result = client.try_admin_force_update_treasury(&attacker, &fleet_id, &new_treasury);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::Unauthorized.into()),
+        _ => panic!("Expected FleetError::Unauthorized"),
+    }
+
+    assert_eq!(client.get_fleet(&fleet_id).treasury, treasury);
 }
 
 #[test]
@@ -148,18 +240,17 @@ fn test_update_fleet_treasury_emits_proposed_event_immediately() {
 
     client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
 
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = last_event(&env);
 
     let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
     assert_eq!(topic0, Symbol::new(&env, "fleet_treasury_change_proposed"));
 
-    let data: (FleetId, Address, Address, Address, u64) =
-        <(FleetId, Address, Address, Address, u64)>::try_from_val(&env, &last_event.2).unwrap();
-    assert_eq!(data.0, fleet_id);
-    assert_eq!(data.1, owner);
-    assert_eq!(data.2, treasury);
-    assert_eq!(data.3, new_treasury);
+    let data: FleetTreasuryChangeProposedEvent =
+        FleetTreasuryChangeProposedEvent::try_from_val(&env, &last_event.2).unwrap();
+    assert_eq!(data.fleet_id, fleet_id);
+    assert_eq!(data.owner, owner);
+    assert_eq!(data.current_treasury, treasury);
+    assert_eq!(data.proposed_treasury, new_treasury);
 }
 
 #[test]
@@ -206,14 +297,16 @@ fn test_confirm_fleet_treasury_update_applies_after_timelock() {
         .set_timestamp(env.ledger().timestamp() + TREASURY_CHANGE_TIMELOCK_SECONDS);
     client.confirm_fleet_treasury_update(&fleet_id);
 
+    // Capture the event right after the mutating call — subsequent read-only
+    // calls don't emit anything and the test harness only surfaces events
+    // from the most recent invocation.
+    let last_event = last_event(&env);
+    let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
+    assert_eq!(topic0, Symbol::new(&env, "fleet_treasury_updated"));
+
     let profile = client.get_fleet(&fleet_id);
     assert_eq!(profile.treasury, new_treasury);
     assert_eq!(client.get_pending_treasury_update(&fleet_id), None);
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
-    assert_eq!(topic0, Symbol::new(&env, "fleet_treasury_updated"));
 }
 
 // ── Issue #68 tests — add_driver_to_fleet ────────────────────────────────────
@@ -238,14 +331,14 @@ fn test_add_driver_emits_driver_invited_event() {
     let driver = Address::generate(&env);
     client.add_driver_to_fleet(&owner, &fleet_id, &driver);
 
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = last_event(&env);
 
     let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
     assert_eq!(topic0, Symbol::new(&env, "driver_invited"));
 
-    let data: (FleetId, Address) = <(FleetId, Address)>::try_from_val(&env, &last_event.2).unwrap();
-    assert_eq!(data, (fleet_id, driver));
+    let data: DriverInvitedEvent = DriverInvitedEvent::try_from_val(&env, &last_event.2).unwrap();
+    assert_eq!(data.fleet_id, fleet_id);
+    assert_eq!(data.driver, driver);
 }
 
 #[test]
@@ -396,8 +489,7 @@ fn test_accept_invite_emits_event() {
     client.add_driver_to_fleet(&owner, &fleet_id, &driver);
     client.accept_fleet_invite(&fleet_id, &driver);
 
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = last_event(&env);
 
     let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
     assert_eq!(topic0, Symbol::new(&env, "invite_accepted"));
@@ -445,7 +537,7 @@ fn test_remove_active_driver_decrements_count() {
     assert_eq!(profile.total_active_drivers, 0);
 
     let status = client.get_driver_fleet_status(&fleet_id, &driver);
-    assert_eq!(status, None);
+    assert_eq!(status, Some(DriverFleetStatus::Removed));
 }
 
 #[test]
@@ -463,7 +555,7 @@ fn test_remove_pending_driver_does_not_affect_active_count() {
     assert_eq!(profile.total_active_drivers, 0);
 
     let status = client.get_driver_fleet_status(&fleet_id, &driver);
-    assert_eq!(status, None);
+    assert_eq!(status, Some(DriverFleetStatus::Removed));
 }
 
 #[test]
@@ -479,7 +571,7 @@ fn test_driver_can_remove_themselves() {
     client.remove_driver_from_fleet(&fleet_id, &driver, &driver);
 
     let status = client.get_driver_fleet_status(&fleet_id, &driver);
-    assert_eq!(status, None);
+    assert_eq!(status, Some(DriverFleetStatus::Removed));
 }
 
 #[test]
@@ -491,8 +583,7 @@ fn test_remove_driver_emits_event() {
     client.add_driver_to_fleet(&owner, &fleet_id, &driver);
     client.remove_driver_from_fleet(&fleet_id, &owner, &driver);
 
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = last_event(&env);
 
     let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
     assert_eq!(topic0, Symbol::new(&env, "driver_removed"));
@@ -555,11 +646,16 @@ fn test_roster_full_lifecycle_add_accept_remove() {
         Some(DriverFleetStatus::Active)
     );
     assert_eq!(client.get_fleet(&fleet_id).total_active_drivers, 1);
+    assert_eq!(client.get_fleet_roster(&fleet_id), soroban_sdk::vec![&env, driver.clone()]);
 
     // Remove: record deleted, count decrements.
     client.remove_driver_from_fleet(&fleet_id, &owner, &driver);
-    assert_eq!(client.get_driver_fleet_status(&fleet_id, &driver), None);
+    assert_eq!(
+        client.get_driver_fleet_status(&fleet_id, &driver),
+        Some(DriverFleetStatus::Removed)
+    );
     assert_eq!(client.get_fleet(&fleet_id).total_active_drivers, 0);
+    assert!(client.get_fleet_roster(&fleet_id).is_empty());
 }
 
 #[test]
@@ -610,7 +706,10 @@ fn test_roster_driver_can_leave_voluntarily() {
     // Driver removes themselves.
     client.remove_driver_from_fleet(&fleet_id, &driver, &driver);
 
-    assert_eq!(client.get_driver_fleet_status(&fleet_id, &driver), None);
+    assert_eq!(
+        client.get_driver_fleet_status(&fleet_id, &driver),
+        Some(DriverFleetStatus::Removed)
+    );
     assert_eq!(client.get_fleet(&fleet_id).total_active_drivers, 0);
 }
 
@@ -721,7 +820,8 @@ fn test_register_fleet_twice_same_owner_with_identity_contract() {
     let (env, client, admin) = setup_test();
 
     let identity_id = env.register(IdentityReputationContract, ());
-    let identity_client = identity_reputation_contract::Client::new(&env, &identity_id);
+    let identity_client =
+        identity_reputation_contract::IdentityReputationContractClient::new(&env, &identity_id);
 
     client.set_identity_contract(&admin, &identity_id);
 
@@ -745,7 +845,8 @@ fn test_register_fleet_for_existing_driver_succeeds() {
     let (env, client, admin) = setup_test();
 
     let identity_id = env.register(IdentityReputationContract, ());
-    let identity_client = identity_reputation_contract::Client::new(&env, &identity_id);
+    let identity_client =
+        identity_reputation_contract::IdentityReputationContractClient::new(&env, &identity_id);
 
     client.set_identity_contract(&admin, &identity_id);
 
@@ -860,6 +961,40 @@ fn test_configure_signers_adds_multiple_signers() {
 }
 
 #[test]
+fn test_signer_threshold_is_enforced_for_fleet_actions() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+    let pending_driver = Address::generate(&env);
+    let active_driver = Address::generate(&env);
+    client.add_driver_to_fleet(&owner, &fleet_id, &pending_driver);
+    client.add_driver_to_fleet(&owner, &fleet_id, &active_driver);
+    client.accept_fleet_invite(&fleet_id, &active_driver);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(owner.clone());
+    signers.push_back(signer2);
+    client.configure_signers(&owner, &fleet_id, &signers, &2u32);
+
+    let new_treasury = Address::generate(&env);
+    assert!(client
+        .try_update_fleet_treasury(&owner, &fleet_id, &new_treasury)
+        .is_err());
+    assert!(client
+        .try_add_driver_to_fleet(&owner, &fleet_id, &Address::generate(&env))
+        .is_err());
+    assert!(client
+        .try_cancel_invite(&owner, &fleet_id, &pending_driver)
+        .is_err());
+    assert!(client
+        .try_remove_driver_from_fleet(&fleet_id, &owner, &active_driver)
+        .is_err());
+}
+
+#[test]
 fn test_configure_signers_unauthorized_not_owner() {
     let (env, client, _admin) = setup_test();
 
@@ -891,6 +1026,12 @@ fn test_update_fleet_treasury_with_authorized_signer() {
 
     let new_treasury = Address::generate(&env);
     client.update_fleet_treasury(&owner, &fleet_id, &new_treasury);
+
+    // update_fleet_treasury only proposes the change (Issue #70 timelock);
+    // it must be confirmed after the timelock elapses to actually apply.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + TREASURY_CHANGE_TIMELOCK_SECONDS);
+    client.confirm_fleet_treasury_update(&fleet_id);
 
     let profile = client.get_fleet(&fleet_id);
     assert_eq!(profile.treasury, new_treasury);
@@ -937,6 +1078,39 @@ fn test_add_driver_authorized_signer_allowed() {
 }
 
 #[test]
+fn test_configure_signers_rejects_invalid_threshold() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+    let mut signers = soroban_sdk::Vec::new(&env);
+    signers.push_back(owner.clone());
+
+    let result = client.try_configure_signers(&owner, &fleet_id, &signers, &2u32);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::InvalidConfiguration.into()),
+        _ => panic!("Expected FleetError::InvalidConfiguration"),
+    }
+}
+
+#[test]
+fn test_configure_signers_rejects_zero_threshold() {
+    let (env, client, _admin) = setup_test();
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_id = client.register_fleet(&owner, &treasury);
+    let signers = soroban_sdk::Vec::new(&env);
+
+    let result = client.try_configure_signers(&owner, &fleet_id, &signers, &0u32);
+    match result {
+        Err(Ok(err)) => assert_eq!(err, FleetError::InvalidConfiguration.into()),
+        _ => panic!("Expected FleetError::InvalidConfiguration"),
+    }
+}
+
+#[test]
 fn test_add_driver_unauthorized_not_signer() {
     let (env, client, _admin) = setup_test();
 
@@ -976,7 +1150,7 @@ fn test_remove_driver_by_authorized_signer() {
     client.remove_driver_from_fleet(&fleet_id, &signer2, &driver);
 
     let status = client.get_driver_fleet_status(&fleet_id, &driver);
-    assert_eq!(status, None);
+    assert_eq!(status, Some(DriverFleetStatus::Removed));
 }
 
 #[test]
@@ -994,57 +1168,166 @@ fn test_remove_driver_not_signer_but_is_driver() {
     client.remove_driver_from_fleet(&fleet_id, &driver, &driver);
 
     let status = client.get_driver_fleet_status(&fleet_id, &driver);
-    assert_eq!(status, None);
+    assert_eq!(status, Some(DriverFleetStatus::Removed));
+}
+
 // ── Cross-contract integration tests ──────────────────────────────────────────
 
+/// Issue #12 regression test: `get_payout_address` existing in isolation
+/// doesn't prove `escrow_contract::release_escrow` actually routes an active
+/// fleet driver's payout through the fleet treasury instead of paying the
+/// driver directly. This wires real escrow_contract + fleet_management_contract
+/// together and asserts the treasury (not the driver) receives the funds.
 #[test]
-#[ignore]
 fn test_escrow_payout_routes_through_fleet_treasury() {
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
     let env = Env::default();
     env.mock_all_auths();
 
-    // Set up fleet management contract
     let fleet_contract_id = env.register(FleetManagementContract, ());
     let fleet_client = FleetManagementContractClient::new(&env, &fleet_contract_id);
     let fleet_admin = Address::generate(&env);
     fleet_client.init(&fleet_admin);
 
-    // Set up escrow contract
     let escrow_contract_id = env.register(EscrowContract, ());
     let escrow_client = escrow_contract::EscrowContractClient::new(&env, &escrow_contract_id);
     let escrow_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(escrow_admin.clone())
+        .address();
 
-    // Create a mock token contract address (we'll use a generated address as a placeholder)
-    let token = Address::generate(&env);
+    escrow_client.init(&escrow_admin, &token, &0);
+    escrow_client.set_fleet_management_contract(&escrow_admin, &fleet_contract_id);
 
-    // Initialize escrow contract
-    escrow_client.init(&escrow_admin, &token, 500); // 5% platform fee
-
-    // Register a fleet with owner and treasury
     let fleet_owner = Address::generate(&env);
     let fleet_treasury = Address::generate(&env);
     let fleet_id = fleet_client.register_fleet(&fleet_owner, &fleet_treasury);
-    assert_eq!(fleet_id, 1);
 
-    // Add a driver to the fleet
     let driver = Address::generate(&env);
     fleet_client.add_driver_to_fleet(&fleet_owner, &fleet_id, &driver);
-
-    // Driver accepts the invite
     fleet_client.accept_fleet_invite(&fleet_id, &driver);
+    assert_eq!(
+        fleet_client.get_driver_fleet_status(&fleet_id, &driver),
+        Some(DriverFleetStatus::Active)
+    );
+    assert_eq!(
+        fleet_client.get_payout_address(&driver, &fleet_id),
+        fleet_treasury
+    );
 
-    // Verify driver is now active
-    let status = fleet_client.get_driver_fleet_status(&fleet_id, &driver);
-    assert_eq!(status, Some(DriverFleetStatus::Active));
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
 
-    // Verify get_payout_address returns the fleet treasury for active drivers
-    let payout_address = fleet_client.get_payout_address(&driver, &fleet_id);
-    assert_eq!(payout_address, fleet_treasury);
+    escrow_client.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &42u64,
+        &token,
+        &1000,
+        &Some(fleet_id),
+    );
+    escrow_client.release_escrow(&recipient, &42u64);
 
-    // When escrow_contract calls get_payout_address with this driver and fleet_id,
-    // it should receive the treasury address for routing payouts.
-    // This test verifies the integration point is correctly wired.
-    // The actual payout routing through this address is tested in GitHub #12.
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&fleet_treasury), 1000);
+    assert_eq!(token_client.balance(&driver), 0);
+}
+
+/// Full protocol happy path using the real delivery, escrow, identity, and
+/// fleet contracts. Delivery creation and escrow funding are separate calls;
+/// the remaining lifecycle calls exercise their cross-contract integrations.
+#[test]
+fn test_full_protocol_happy_path() {
+    use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+
+    let escrow_id = env.register(EscrowContract, ());
+    let escrow = escrow_contract::EscrowContractClient::new(&env, &escrow_id);
+    escrow.init(&admin, &token, &250);
+
+    let fleet_id = env.register(FleetManagementContract, ());
+    let fleet = FleetManagementContractClient::new(&env, &fleet_id);
+    fleet.init(&admin);
+    fleet.set_escrow_contract(&admin, &escrow_id);
+
+    let delivery_id = env.register(DeliveryContract, ());
+    let delivery = delivery_contract::DeliveryContractClient::new(&env, &delivery_id);
+    delivery.init(&admin, &escrow_id);
+
+    let dispute_id = Address::generate(&env);
+    let identity_id = env.register(IdentityReputationContract, ());
+    let identity =
+        identity_reputation_contract::IdentityReputationContractClient::new(&env, &identity_id);
+    identity.init(&admin, &delivery_id, &dispute_id);
+    delivery.set_identity_reputation_contract(&admin, &identity_id);
+    fleet.set_identity_contract(&admin, &identity_id);
+
+    let owner = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fleet_record_id = fleet.register_fleet(&owner, &treasury);
+    let driver = Address::generate(&env);
+    identity.register_driver(&driver);
+    fleet.add_driver_to_fleet(&owner, &fleet_record_id, &driver);
+    fleet.accept_fleet_invite(&fleet_record_id, &driver);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let metadata = DeliveryMetadata {
+        delivery_id: 0,
+        origin: soroban_sdk::String::from_str(&env, "Origin"),
+        destination: soroban_sdk::String::from_str(&env, "Destination"),
+        cargo_description: CargoDescriptor {
+            weight_grams: 100,
+            category: CargoCategory::General,
+            fragile: false,
+        },
+        created_at: env.ledger().timestamp(),
+        estimated_delivery: env.ledger().timestamp() + 86400,
+    };
+    let delivery_record_id = delivery.create_delivery(&sender, &recipient, &metadata);
+    assert_eq!(delivery_record_id, 1u64.into());
+
+    StellarAssetClient::new(&env, &token).mint(&sender, &1000);
+    escrow.create_escrow(
+        &sender,
+        &recipient,
+        &driver,
+        &u64::from(delivery_record_id),
+        &token,
+        &1000,
+        &Some(fleet_record_id),
+    );
+
+    delivery.assign_driver(&driver, &delivery_record_id, &driver);
+    delivery.mark_in_transit(&driver, &delivery_record_id);
+    delivery.confirm_delivery(&recipient, &delivery_record_id);
+
+    let confirmed = delivery.get_delivery(&delivery_record_id);
+    assert_eq!(confirmed.status, DeliveryStatus::Delivered);
+    assert_eq!(escrow.get_escrow(&1u64).status, EscrowStatus::Holdback);
+
+    let profile = identity.get_driver_profile(&driver);
+    assert_eq!(profile.deliveries_completed, 1);
+    assert_eq!(profile.reputation_score, 55);
+
+    escrow.release_holdback_escrow(&recipient, &1u64);
+    assert_eq!(escrow.get_escrow(&1u64).status, EscrowStatus::Released);
+
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&treasury), 750);
+    assert_eq!(token_client.balance(&admin), 250);
+    assert_eq!(token_client.balance(&driver), 0);
+    assert_eq!(token_client.balance(&escrow_id), 0);
 }
 
 // ── Issue #108 tests — deactivate_fleet ───────────────────────────────────────
@@ -1057,7 +1340,7 @@ fn test_owner_can_deactivate_fleet() {
     client.deactivate_fleet(&owner, &fleet_id);
 
     let profile = client.get_fleet(&fleet_id);
-    assert_eq!(profile.active, false);
+    assert!(!profile.active);
 }
 
 #[test]
@@ -1068,7 +1351,7 @@ fn test_admin_can_deactivate_fleet() {
     client.deactivate_fleet(&admin, &fleet_id);
 
     let profile = client.get_fleet(&fleet_id);
-    assert_eq!(profile.active, false);
+    assert!(!profile.active);
 }
 
 #[test]
@@ -1097,8 +1380,7 @@ fn test_deactivate_fleet_emits_event() {
 
     client.deactivate_fleet(&owner, &fleet_id);
 
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = last_event(&env);
     let topic0: Symbol = Symbol::try_from_val(&env, &last_event.1.get(0).unwrap()).unwrap();
     assert_eq!(topic0, Symbol::new(&env, "fleet_deactivated"));
 }

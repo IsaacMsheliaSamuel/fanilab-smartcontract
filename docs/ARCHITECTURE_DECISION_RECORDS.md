@@ -314,7 +314,12 @@ Provide a read-only `get_combined_state(delivery_id)` view that fetches both rec
 ## ADR-011: Shared Governance Abstraction
 
 **Date**: 2026-01-15  
-**Status**: Accepted
+**Status**: Revised (see Addendum below) — the `AdminManager` module described
+in the original decision was built but never adopted by any contract, and
+was removed as dead code during the FC-1 cleanup batch (see
+`docs/CODEBASE_FINAL_CLEANUP_REPORT.md`). The original Context/Decision/
+Rationale sections are kept for history; see the Addendum for what was
+actually implemented instead.
 
 ### Context
 Admin/governance models are implemented inconsistently across the six contracts: escrow_contract, delivery_contract, fleet_management_contract, and identity_reputation_contract each use a single Admin: Address pattern (with rotation support only in escrow_contract), while dispute_resolution_contract uses a multi-admin model with per-address boolean storage. This leads to different security properties and inconsistent APIs across the protocol.
@@ -351,6 +356,47 @@ Introduce a shared `governance` module in `shared_types` that provides `AdminMan
 - Migrate all six contracts to use the shared AdminManager
 - Add threshold-based multi-sig support if needed
 - Document governance security model in GOVERNANCE.md
+
+### Addendum (FC-1 re-evaluation)
+`shared_types::governance::AdminManager` was implemented per this ADR but
+never wired into any contract — confirmed via a repo-wide grep finding zero
+references outside its own definition. Re-evaluating it against the actual
+governance needs across the six contracts found two separate problems it
+didn't solve well:
+
+1. **The single-admin case already had a better answer.** A simpler
+   `shared_types::is_admin(env, caller) -> bool` function (no `AdminDataKey`
+   indirection) already existed and was already adopted by `escrow_contract`
+   and `delivery_contract`. `AdminManager::is_single_admin` would have been
+   a strictly more complex way to do the same thing. Instead of wiring in
+   `AdminManager`, `fleet_management_contract` and
+   `identity_reputation_contract` were migrated onto `is_admin` directly,
+   deleting their local, duplicate single-admin helpers
+   (`is_fleet_admin` and an inline `DataKey::Admin` comparison,
+   respectively). Four of six contracts now share one single-admin
+   implementation.
+2. **The multi-admin case was a downgrade, not an improvement.**
+   `dispute_resolution_contract`'s existing multi-admin implementation
+   (`DataKey::Admin(Address) -> bool` flags for O(1) membership checks,
+   plus a separately maintained `DataKey::AdminList` for enumeration, with
+   a last-admin-removal guard added in a prior hardening batch) is more
+   efficient than `AdminManager::is_multi_admin`, which stores admins as a
+   single `Vec<Address>` and does an O(n) linear scan per check. Migrating
+   dispute_resolution_contract onto `AdminManager` would have meant
+   rewriting a working, tested, already-hardened implementation to be
+   *slower*, for no consistency benefit beyond sharing a struct name.
+
+Multi-admin support is a genuinely different governance model from
+single-admin, not a duplicate implementation of the same thing — merging
+them into one abstraction would have meant either losing multi-admin
+support entirely or forcing every single-admin contract through
+multi-admin's less efficient storage shape. `dispute_resolution_contract`
+keeping its own implementation is treated as an intentional architectural
+boundary, not unaddressed duplication (see Issue #77's disposition in
+`docs/CODEBASE_FINAL_CLEANUP_REPORT.md`).
+
+`AdminManager` and its `AdminDataKey` enum were deleted from
+`shared_types` accordingly.
 
 ---
 

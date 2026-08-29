@@ -74,6 +74,16 @@ All topic helpers live in `shared_types::events`. Each helper wraps `Symbol::new
 | `kyc_status_updated` | `"kyc_status_updated"` | `identity_reputation_contract` |
 | `reputation_increased` | `"reputation_increased"` | `identity_reputation_contract` |
 | `reputation_decreased` | `"reputation_decreased"` | `identity_reputation_contract` |
+| `protocol_initialized` | `"protocol_initialized"` | `escrow_contract` |
+| `fee_updated` | `"fee_updated"` | `escrow_contract` |
+| `settlement_contract_proposed` | `"settlement_contract_proposed"` | `escrow_contract` |
+| `settlement_contract_updated` | `"settlement_contract_updated"` | `escrow_contract` |
+| `admin_transferred` | `"admin_transferred"` | `escrow_contract` |
+| `protocol_pause_status_changed` | `"protocol_pause_status_changed"` | `escrow_contract` |
+| `delivery_contract_initialized` | `"delivery_contract_initialized"` | `delivery_contract` |
+
+These seven were the last holdouts still using raw inline `Symbol::new(&env, "PascalCase")`
+calls instead of a `shared_types::events` helper (Issue #47) — fixed alongside this table.
 
 ---
 

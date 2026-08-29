@@ -237,7 +237,7 @@ fanilab-smartcontract/
 1. **Install Rust and standard utilities:**
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   rustup target add wasm32-unknown-unknown
+   rustup target add wasm32v1-none
    ```
 
 2. **Install Stellar CLI:**
@@ -278,14 +278,14 @@ fanilab-smartcontract/
    
    To build all contracts:
    ```bash
-   cargo build --target wasm32-unknown-unknown --release
+   cargo build --target wasm32v1-none --release
    ```
    
    To build specific contracts:
    ```bash
-   cargo build -p escrow_contract --target wasm32-unknown-unknown --release
-   cargo build -p delivery_contract --target wasm32-unknown-unknown --release
-   cargo build -p dispute_resolution_contract --target wasm32-unknown-unknown --release
+   cargo build -p escrow_contract --target wasm32v1-none --release
+   cargo build -p delivery_contract --target wasm32v1-none --release
+   cargo build -p dispute_resolution_contract --target wasm32v1-none --release
    ```
    
    To run tests:

@@ -6,6 +6,10 @@
 set -e
 
 NETWORK=${1:-testnet}
+# Name of the Stellar CLI identity every deploy/initialize script signs with.
+# Overridable, but the default must match the identity provisioned by
+# .github/workflows/deploy-testnet.yml and documented in docs/DEPLOYMENT.md.
+DEPLOYER_IDENTITY="${DEPLOYER_IDENTITY:-deployer}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTPUT_FILE="$PROJECT_ROOT/contract-ids-$NETWORK.json"
@@ -34,6 +38,21 @@ fi
 
 if ! command -v cargo &> /dev/null; then
     echo "${RED}❌ Cargo not found. Please install Rust.${NC}"
+    exit 1
+fi
+
+if ! stellar keys address "$DEPLOYER_IDENTITY" &> /dev/null; then
+    echo "${RED}❌ Stellar CLI identity '$DEPLOYER_IDENTITY' not found.${NC}"
+    echo "   Every deploy/initialize script signs with it (--source $DEPLOYER_IDENTITY)."
+    echo "   • CI: the 'Configure deployer identity' step in"
+    echo "     .github/workflows/deploy-testnet.yml provisions it from the"
+    echo "     CONTRACT_DEPLOYER_SECRET secret (environment secret"
+    echo "     TESTNET_DEPLOYER_SECRET). Make sure that secret is set for the"
+    echo "     'testnet' environment."
+    echo "   • Local: create it once with"
+    echo "       stellar keys generate $DEPLOYER_IDENTITY --network $NETWORK"
+    echo "     or import an existing key with"
+    echo "       stellar keys add $DEPLOYER_IDENTITY --secret-key"
     exit 1
 fi
 
@@ -67,7 +86,7 @@ deploy_contract() {
     
     local contract_id=$(stellar contract deploy \
         --wasm "$wasm_path" \
-        --source deployer \
+        --source "$DEPLOYER_IDENTITY" \
         --network "$NETWORK" 2>&1)
     
     if [ $? -eq 0 ]; then
