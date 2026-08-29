@@ -3,7 +3,7 @@
 use shared_types::FaniLabError;
 use shared_types::{
     delivery_key, events, ttl, DeliveryCreatedEvent, DeliveryConfirmedEvent, DeliveryDisputedEvent,
-    DriverAssignedEvent, DeliveryMetadata, DriverProfile, StorageKey,
+    DriverAssignedEvent, DeliveryMetadata, DriverProfile, DriverStatus, StorageKey,
 };
 pub use shared_types::{DeliveryId, DeliveryRecord, DeliveryStatus};
 use soroban_sdk::{
@@ -689,6 +689,7 @@ impl DeliveryContract {
                 reputation_score: 0,
                 registered_at: env.ledger().timestamp(),
                 kyc_verified: false,
+                status: DriverStatus::Active,
             })
     }
 

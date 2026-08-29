@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`identity_reputation_contract`**: `suspend_driver(admin, driver)` — admin-gated function that sets `DriverProfile.status` to `DriverStatus::Suspended`. Profile history (reputation, deliveries completed, KYC) is preserved; the driver may not re-register to reset their score. Emits `driver_suspended`. (Closes #289.)
+- **`identity_reputation_contract`**: `reinstate_driver(admin, driver)` — reverses a suspension, restoring `DriverProfile.status` to `DriverStatus::Active`. Emits `driver_reinstated`. (Closes #289.)
+- **`identity_reputation_contract`**: `is_driver_suspended(driver) -> bool` — read-only accessor for the suspension state.
+- **`shared_types`**: `DriverStatus` enum (`Active`, `Suspended`) — lifecycle state for driver profiles, following the `DriverFleetStatus::Removed` precedent from `fleet_management_contract`.
+- **`shared_types`**: `DriverSuspendedEvent` and `DriverReinstatedEvent` typed event structs.
+- **`shared_types::events`**: `driver_suspended` and `driver_reinstated` topic helpers.
+
+### Changed
+- **BREAKING (wire format):** `DriverProfile` gains a `status: DriverStatus` field, defaulting to `DriverStatus::Active` for all newly registered drivers. Off-chain consumers decoding `DriverProfile` from storage or events must add this field to their decoders. (Relates to #289.)
+### Added
 - Production-ready CI/CD pipeline with security audits
 - CI: coverage upload now fails the build on error (`fail_ci_if_error: true`)
 - CI: `cargo machete` step to detect unused dependencies automatically

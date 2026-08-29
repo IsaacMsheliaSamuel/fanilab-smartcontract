@@ -1,28 +1,17 @@
 #![no_std]
 
 use shared_types::{
-    events, ttl, DriverRegisteredEvent, KycStatusUpdatedEvent, ReputationDecreasedEvent,
-    ReputationIncreasedEvent, UserRegisteredEvent, FaniLabError,
+    events, ttl, DriverProfile, DriverRegisteredEvent, DriverReinstatedEvent, DriverStatus,
+    DriverSuspendedEvent, FaniLabError, KycStatusUpdatedEvent, ReputationDecreasedEvent,
+    ReputationIncreasedEvent, UserRegisteredEvent,
 };
 use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env};
-use shared_types::{DriverProfile, FaniLabError};
-use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env, Symbol};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct UserProfile {
     pub address: Address,
     pub join_date: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct DriverProfile {
-    pub address: Address,
-    pub deliveries_completed: u32,
-    pub reputation_score: u32,
-    pub registered_at: u64,
-    pub kyc_verified: bool,
 }
 
 #[contracttype]
@@ -57,7 +46,6 @@ const MAX_REPUTATION: u32 = 100;
 const GOLD_TIER_THRESHOLD: u32 = 75;
 // Enterprise eligibility is intentionally tied to reaching the Gold tier.
 const ENTERPRISE_THRESHOLD: u32 = GOLD_TIER_THRESHOLD;
-const ENTERPRISE_THRESHOLD: u32 = 75;
 const HEAVY_CARGO_GRAMS: u32 = 5000;
 const DEFAULT_BASE_POINTS: u32 = 5;
 const DEFAULT_HEAVY_CARGO_POINTS: u32 = 3;
@@ -117,7 +105,6 @@ impl IdentityReputationContract {
     }
 
     pub fn set_reputation_config(env: Env, admin: Address, config: ReputationConfig) {
-    pub fn set_delivery_contract(env: Env, admin: Address, delivery_contract: Address) {
         admin.require_auth();
         let stored_admin = Self::get_admin(env.clone());
         if admin != stored_admin {
@@ -137,6 +124,16 @@ impl IdentityReputationContract {
                 heavy_cargo_points: DEFAULT_HEAVY_CARGO_POINTS,
                 fragile_points: DEFAULT_FRAGILE_POINTS,
             })
+    }
+
+    pub fn set_delivery_contract(env: Env, admin: Address, delivery_contract: Address) {
+        admin.require_auth();
+        let stored_admin = Self::get_admin(env.clone());
+        if admin != stored_admin {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+        env.storage()
+            .instance()
             .set(&DataKey::DeliveryContract, &delivery_contract);
     }
 
@@ -189,6 +186,7 @@ impl IdentityReputationContract {
             reputation_score: 50,
             registered_at: env.ledger().timestamp(),
             kyc_verified: false,
+            status: DriverStatus::Active,
         };
 
         env.storage().persistent().set(&key, &profile);
@@ -382,6 +380,113 @@ impl IdentityReputationContract {
     pub fn is_eligible_for_enterprise(env: Env, driver: Address) -> bool {
         let profile = Self::get_driver_profile(env, driver);
         profile.reputation_score >= ENTERPRISE_THRESHOLD
+    }
+
+    // ── Driver suspension lifecycle ───────────────────────────────────────────
+
+    /// Suspend a registered driver.
+    ///
+    /// Sets `DriverProfile.status` to `DriverStatus::Suspended`.  The profile
+    /// record is preserved — history (reputation, deliveries, KYC) is never
+    /// erased.  This prevents a suspended driver from calling `register_driver`
+    /// again to reset their score, since that function panics when a profile
+    /// already exists.
+    ///
+    /// Gating `assign_driver` on suspension status is a follow-up task in
+    /// `delivery_contract`.
+    ///
+    /// **Authorization:** Admin only.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn suspend_driver(env: Env, admin: Address, driver: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+
+        let key = DataKey::DriverProfile(driver.clone());
+        let mut profile: DriverProfile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
+
+        if profile.status == DriverStatus::Suspended {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
+        profile.status = DriverStatus::Suspended;
+        env.storage().persistent().set(&key, &profile);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        env.events().publish(
+            (events::driver_suspended(&env),),
+            DriverSuspendedEvent {
+                driver,
+                admin,
+            },
+        );
+    }
+
+    /// Reinstate a previously suspended driver.
+    ///
+    /// Sets `DriverProfile.status` back to `DriverStatus::Active`.  All
+    /// accumulated reputation and delivery history is retained.
+    ///
+    /// **Authorization:** Admin only.
+    #[allow(deprecated)] // events().publish() is deprecated in SDK 27.0.0 but still functional
+    pub fn reinstate_driver(env: Env, admin: Address, driver: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, FaniLabError::Unauthorized);
+        }
+
+        let key = DataKey::DriverProfile(driver.clone());
+        let mut profile: DriverProfile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, FaniLabError::ProviderNotFound));
+
+        if profile.status == DriverStatus::Active {
+            panic_with_error!(&env, FaniLabError::InvalidState);
+        }
+
+        profile.status = DriverStatus::Active;
+        env.storage().persistent().set(&key, &profile);
+        env.storage().persistent().extend_ttl(
+            &key,
+            ttl::LEDGER_TTL_THRESHOLD,
+            ttl::LEDGER_TTL_EXTEND_TO,
+        );
+
+        env.events().publish(
+            (events::driver_reinstated(&env),),
+            DriverReinstatedEvent {
+                driver,
+                admin,
+            },
+        );
+    }
+
+    /// Returns `true` if the driver's profile exists and is currently suspended.
+    pub fn is_driver_suspended(env: Env, driver: Address) -> bool {
+        let key = DataKey::DriverProfile(driver);
+        let profile: Option<DriverProfile> = env.storage().persistent().get(&key);
+        matches!(profile.map(|p| p.status), Some(DriverStatus::Suspended))
     }
 }
 

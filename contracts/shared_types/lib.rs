@@ -133,6 +133,14 @@ pub mod events {
         Symbol::new(env, "driver_registered")
     }
 
+    pub fn driver_suspended(env: &Env) -> Symbol {
+        Symbol::new(env, "driver_suspended")
+    }
+
+    pub fn driver_reinstated(env: &Env) -> Symbol {
+        Symbol::new(env, "driver_reinstated")
+    }
+
     pub fn user_registered(env: &Env) -> Symbol {
         Symbol::new(env, "user_registered")
     }
@@ -371,6 +379,24 @@ pub struct DriverRegisteredEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriverSuspendedEvent {
+    /// Driver address whose profile was suspended.
+    pub driver: Address,
+    /// Admin address that performed the suspension.
+    pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriverReinstatedEvent {
+    /// Driver address whose profile was reinstated.
+    pub driver: Address,
+    /// Admin address that performed the reinstatement.
+    pub admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserRegisteredEvent {
     /// User address that was registered.
     pub user: Address,
@@ -545,6 +571,23 @@ pub struct DeliveryDetails {
     pub status: DeliveryStatus,
 }
 
+/// Lifecycle status for a driver profile.
+///
+/// `Active` is the initial state for every newly registered driver.
+/// `Suspended` is set by an admin via `suspend_driver` and can be reversed
+/// with `reinstate_driver`.  The profile record is **never deleted** — this
+/// preserves audit history and prevents a suspended driver from re-registering
+/// to reset their score (register_driver panics if a profile already exists).
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum DriverStatus {
+    /// Driver is registered and may participate in the protocol.
+    Active,
+    /// Driver has been administratively suspended; profile is preserved for
+    /// audit purposes but the driver may not accept new assignments.
+    Suspended,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DriverProfile {
@@ -553,6 +596,9 @@ pub struct DriverProfile {
     pub reputation_score: u32,
     pub registered_at: u64,
     pub kyc_verified: bool,
+    /// Lifecycle status — `Active` on registration, `Suspended` after an
+    /// admin call to `suspend_driver`, restorable via `reinstate_driver`.
+    pub status: DriverStatus,
 }
 
 #[contracttype]
@@ -570,10 +616,11 @@ mod test {
         DeliveryStatus, DisputeRaisedEvent, DisputeResolvedEvent, DisputeResolvedPayoutEvent,
         DisputeResolvedRefundEvent, DisputeResolvedSplitEvent, DriverAssignedEvent,
         DriverInvitedEvent, DriverProfile, DriverRegisteredEvent, DriverRemovedEvent,
-        EscrowFundedEvent, EscrowRecord, EscrowRefundedEvent, EscrowReleasedEvent, EscrowState,
-        FaniLabError, FleetRegisteredEvent, FleetTreasuryUpdatedEvent, InviteAcceptedEvent,
-        KycStatusUpdatedEvent, PartyAddresses, ProtocolConfig, ReputationDecreasedEvent,
-        ReputationIncreasedEvent, StorageKey, UserProfile, UserRegisteredEvent,
+        DriverStatus, EscrowFundedEvent, EscrowRecord, EscrowRefundedEvent, EscrowReleasedEvent,
+        EscrowState, FaniLabError, FleetRegisteredEvent, FleetTreasuryUpdatedEvent,
+        InviteAcceptedEvent, KycStatusUpdatedEvent, PartyAddresses, ProtocolConfig,
+        ReputationDecreasedEvent, ReputationIncreasedEvent, StorageKey, UserProfile,
+        UserRegisteredEvent,
     };
     use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
@@ -912,6 +959,7 @@ mod test {
             reputation_score: 85,
             registered_at: 1000000,
             kyc_verified: true,
+            status: DriverStatus::Active,
         };
 
         assert_eq!(profile.address, address);
